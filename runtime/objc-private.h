@@ -151,6 +151,7 @@ private:
     void clearDeallocating_slow();
 
     // Side table retain count overflow for nonpointer isa
+    // Side table保留非指针isa的计数溢出
     void sidetable_lock();
     void sidetable_unlock();
 
@@ -161,6 +162,7 @@ private:
 #endif
 
     // Side-table-only retain count
+    // 只使用Side table 计数
     bool sidetable_isDeallocating();
     void sidetable_clearDeallocating();
 
@@ -738,12 +740,20 @@ class TimeLogger {
     }
 };
 
+/**
+ 什么是Cache Line
+ Cache Line可以简单的理解为CPU Cache中的最小缓存单位。目前主流的CPU Cache的Cache Line大小都是64Bytes。
+ http://cenalulu.github.io/linux/all-about-cpu-cache/
+ */
 enum { CacheLineSize = 64 };
 
 // StripedMap<T> is a map of void* -> T, sized appropriately 
 // for cache-friendly lock striping. 
 // For example, this may be used as StripedMap<spinlock_t>
 // or as StripedMap<SomeStruct> where SomeStruct stores a spin lock.
+
+// StripedMap<T> 是一个模板类，根据传递的实际参数决定其中 array 成员存储的元素类型。
+// 能通过对象的地址，运算出 Hash 值，通过该 hash 值找到对应的 value 。
 template<typename T>
 class StripedMap {
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
@@ -753,25 +763,40 @@ class StripedMap {
 #endif
 
     struct PaddedT {
-        T value alignas(CacheLineSize);
+        T value alignas(CacheLineSize); /// 按照64对齐，即泛型value长度64位  T泛型： SideTable
+        ///alignas什么是对齐?   举例说明，某个int类型的对象，要求其存储地址的特征是4的整倍数
     };
 
-    PaddedT array[StripeCount];
-
+    PaddedT array[StripeCount]; ///存放PaddedT结构的数组
+    
+    ///主要还是调用了reinterpret_cast将传入的对象地址进行类型转换的，并通过一定算法计算出指针的index，最后的%StripeCount保证保证了index不会越界
     static unsigned int indexForPointer(const void *p) {
+        // 将p的值以二进制的方式解释为uintptr_t（unsigned long）并赋值给addr
         uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+        // 哈希函数
         return ((addr >> 4) ^ (addr >> 9)) % StripeCount;
     }
 
  public:
+    /// 操作符重载
     T& operator[] (const void *p) { 
-        return array[indexForPointer(p)].value; 
+        return array[indexForPointer(p)].value; /// array中存储的是PaddedT结构其中定义了一个T泛型的变量value
     }
+    /**
+     通过 SideTable& table = SideTables()[this]; 从SideTables中获取this对象的SideTable
+     
+     代码中将一个对象传入，由于重载了运算符所以实际的[this]会进入的到这个类中的重载方法array[indexForPointer(p)]里。
+     然后通过indexForPointer方法得到的进行强制类型转换，最终得到这个这个hash地址在array中的index。通过index得到的是
+     这个hash表中的键值对，最后调用获取value方法得到相应的SideTable（注意这里不是SideTables）
+     */
+    
+    
     const T& operator[] (const void *p) const { 
         return const_cast<StripedMap<T>>(this)[p]; 
     }
 
     // Shortcuts for StripedMaps of locks.
+    // 锁操作
     void lockAll() {
         for (unsigned int i = 0; i < StripeCount; i++) {
             array[i].value.lock();
@@ -830,6 +855,13 @@ class StripedMap {
 // nil is disguised as itself so zero-filled memory works as expected, 
 // which means 0x80..00 is also disguised as itself but we don't care.
 // Note that weak_entry_t knows about this encoding.
+
+// DisguisedPtr <T>的行为类似于指针类型T *，除了储值被伪装成对诸如“泄漏”之类的工具隐藏。
+// nil本身是伪装的，因此零填充内存可以按预期工作，
+// 表示0x80..00本身也被伪装，但我们不在乎。
+// 注意，weak_entry_t知道这种编码。
+
+// DisguisedPtr类的定义如下。它对一个指针伪装处理，保存时装箱，调用时拆箱。可不纠结于为什么要将指针伪装，只需要知道DisguisedPtr<T>功能上等价于T*即可。
 template <typename T>
 class DisguisedPtr {
     uintptr_t value;

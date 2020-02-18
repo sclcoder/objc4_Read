@@ -90,15 +90,16 @@ enum HaveOld { DontHaveOld = false, DoHaveOld = true };
 enum HaveNew { DontHaveNew = false, DoHaveNew = true };
 
 struct SideTable {
-    spinlock_t slock;
-    RefcountMap refcnts;
-    weak_table_t weak_table;
+    spinlock_t slock; /// 自旋锁,锁的定义放在了实际的类型中
+    RefcountMap refcnts; /// 存放引用计数的全局hash表
+    weak_table_t weak_table; /// 存放弱引用的全局hash表
 
-    SideTable() {
-        memset(&weak_table, 0, sizeof(weak_table));
+    SideTable() { /// 构造函数
+        memset(&weak_table, 0, sizeof(weak_table)); /// 初始化weak_table
+        /// C 库函数 void *memset(void *str, int c, size_t n) 复制字符 c（一个无符号字符）到参数 str 所指向的字符串的前 n 个字符。
     }
 
-    ~SideTable() {
+    ~SideTable() { /// 析构函数
         _objc_fatal("Do not delete SideTable.");
     }
 
@@ -107,11 +108,22 @@ struct SideTable {
     void forceReset() { slock.forceReset(); }
 
     // Address-ordered lock discipline for a pair of side tables.
-
+    /// 两个关于锁操作的静态模板函数
     template<HaveOld, HaveNew>
     static void lockTwo(SideTable *lock1, SideTable *lock2);
+    
     template<HaveOld, HaveNew>
     static void unlockTwo(SideTable *lock1, SideTable *lock2);
+    
+    
+    /**
+     1. spinlock_t 自旋锁在runtime源码中经常看到，当自旋锁被一个线程获得时，他不能被其他线程获得。和互斥锁不同的是，它不会从函数直接返回，让线程sleep，而是让其处于active状态。
+     由于自旋不释放CPU，因而持有自选锁的线程应尽快释放锁,好的一面的看，这样减少了上下文的切换速度。也因此它的使用场景应该是那种占用时间较短抢占情况。
+
+     我们注意到这里 slock 属性是放置每个SideTable下的，这种细粒度的锁到底有什么意义？
+     我们知道，一般代码加锁是为了保障读写安全，结合实际，如果整个SideTables只用一个锁去做处理，也就意味着，一旦表中的一个SideTable在被其他线程操作，那么其他线程将无法对其他SideTable进行处理，可想而知这种实现方式的效率是比较低的。而如果我们转换思想，降低锁的粒度，让他分配到每个SideTable中时，即使表中有SideTable正在被读取或者写入，但是不会影响到表中其他的元素。同时也保证了线程读写安全。在一定程度上给数据读写提供提供了相当高的伸缩性，每个锁的在理想情况下共同分担竞争请求。
+     这种处理方式也就是所谓拆分锁。
+     */
 };
 
 
@@ -162,15 +174,42 @@ void SideTable::unlockTwo<DontHaveOld, DoHaveNew>
 // libc calls us before our C++ initializers run. We also don't want a global 
 // pointer to this struct because of the extra indirection.
 // Do it the hard way.
-alignas(StripedMap<SideTable>) static uint8_t 
-    SideTableBuf[sizeof(StripedMap<SideTable>)];
+/**
+    我们不能用C++静态初始化方法去初始化SideTables，
+    因为C++初始化方法运行之前libc就会调用我们；我们同样不想用一个全局的指针去指向SideTables，
+    因为需要额外的代价。但是没办法我们只能这样。
+ */
+
+// libc 比 C++ static initializer 先调用到 SideTables，所以不能用 C++ static initializer 去调用 SideTableInit ，所以才用 SideTableBuf 来初始化。
+/// 初始化SideTables: StripedMap<SideTable>类型
+alignas(StripedMap<SideTable>) static uint8_t
+    SideTableBuf[sizeof(StripedMap<SideTable>)]; /// 申请空间
 
 static void SideTableInit() {
     new (SideTableBuf) StripedMap<SideTable>();
 }
 
-static StripedMap<SideTable>& SideTables() {
-    return *reinterpret_cast<StripedMap<SideTable>*>(SideTableBuf);
+/**
+    我们看到SideTables本质上StripedMap类型。其中包含的元素为SideTable类型
+    这里的reinterpret_cast关键字，我们可以理解为强制类型转换，也就是将SideTableBuf转换为
+    StripedMap类型，其中包含的元素为SideTale类型。
+ */
+static StripedMap<SideTable>& SideTables() { /// 返回指向StripedMap<SideTable>的隐式指针
+    
+    return *reinterpret_cast<StripedMap<SideTable>*>(SideTableBuf); /// 将SideTableBuf转为StripedMap<SideTable>*
+        
+    /** C++知识点
+        1.使用了 C++ 标准转换运算符 reinterpret_cast ，其表达方式为：reinterpret_cast <new_type> (expression)
+        用来处理无关类型之间的转换。该关键字会产生一个新值，并保证与原参数（expression）拥有完全相同的比特位。
+        reinterpret_cast 运算符并不会改变括号中运算对象的值，而是对该对象从位模式上进行重新解释 https://zhuanlan.zhihu.com/p/33040213
+         
+        2.引用就是个弱化的指针
+         引用变量是一个别名，也就是说，它是某个已存在变量的另一个名字。一旦把引用初始化为某个变量，就可以使用该引用名称或变量名称来指向变量。
+         https://www.runoob.com/cplusplus/cpp-references.html
+         通过使用引用来替代指针，会使 C++ 程序更容易阅读和维护。C++ 函数可以返回一个引用，方式与返回一个指针类似。
+         当函数返回一个引用时，则返回一个指向返回值的隐式指针
+         https://www.runoob.com/cplusplus/returning-values-by-reference.html
+    */
 }
 
 // anonymous namespace
@@ -257,21 +296,46 @@ objc_storeStrong(id *location, id obj)
 //   that needs to be cleaned up. This value might be nil.
 // If HaveNew is true, there is a new value that needs to be 
 //   assigned into the variable. This value might be nil.
-// If CrashIfDeallocating is true, the process is halted if newObj is 
+// If CrashIfDeallocating is true, the process is halted（停止） if newObj is
 //   deallocating or newObj's class does not support weak references. 
 //   If CrashIfDeallocating is false, nil is stored instead.
+
+// HaveOld:     true - 变量有值
+//             false - 需要被及时清理，当前值可能为 nil
+// HaveNew:     true - 需要被分配的新值，当前值可能为 nil
+//             false - 不需要分配新值
+// CrashIfDeallocating: true - 说明 newObj 已经释放或者 newObj 不支持弱引用，该过程需要暂停
+//             false - 用 nil 替代存储
+
 enum CrashIfDeallocating {
     DontCrashIfDeallocating = false, DoCrashIfDeallocating = true
 };
+
+
+///C++的模板函数 语法解释：https://blog.csdn.net/qq_35637562/article/details/55194097
+
+/**
+ HaveOld：是否有旧值；
+ HaveNew：是否指定新值；
+ CrashIfDeallocating：若为true，传入的newObj不支持weak类型或野指针时程序将中断运行；若为false，传入的newObj不支持weak类型或野指针时置新值为nil；
+ location：weak指针旧值地址（类型 objc_object **）；
+ newObj：weak指针新值（类型 objc_object *）；
+ */
 template <HaveOld haveOld, HaveNew haveNew,
           CrashIfDeallocating crashIfDeallocating>
 static id 
 storeWeak(id *location, objc_object *newObj)
 {
-    assert(haveOld  ||  haveNew);
+    // 该过程用来更新弱引用指针的指向
+    
+    assert(haveOld  ||  haveNew); // assert断言，assert(表达式)，表达式为真，什么也不做，表达式为假则crash。
     if (!haveNew) assert(newObj == nil);
-
+    
+    // 初始化 previouslyInitializedClass 指针
     Class previouslyInitializedClass = nil;
+    
+    // 声明两个 SideTable
+    // ① 新旧散列创建
     id oldObj;
     SideTable *oldTable;
     SideTable *newTable;
@@ -279,21 +343,31 @@ storeWeak(id *location, objc_object *newObj)
     // Acquire locks for old and new values.
     // Order by lock address to prevent lock ordering problems. 
     // Retry if the old value changes underneath us.
+    
+    // 获得新值和旧值的锁存位置（用地址作为唯一标示）
+    // 通过地址来建立索引标志，防止桶重复
+    // 下面指向的操作会改变旧值
  retry:
     if (haveOld) {
+        // 更改指针，获得以 oldObj 为索引所存储的值地址
         oldObj = *location;
-        oldTable = &SideTables()[oldObj];
+        oldTable = &SideTables()[oldObj]; /// SideTables全局静态hash表: StripedMap<SideTable>类型
     } else {
         oldTable = nil;
     }
     if (haveNew) {
+        // 更改新值指针，获得以 newObj 为索引所存储的值地址
+        /// 怎么样获取的SideTable:
         newTable = &SideTables()[newObj];
     } else {
         newTable = nil;
     }
-
+    
+    // 加锁操作，防止多线程中竞争冲突
     SideTable::lockTwo<haveOld, haveNew>(oldTable, newTable);
 
+    // 避免线程冲突重处理
+    // location 应该与 oldObj 保持一致，如果不同，说明当前的 location 已经处理过 oldObj 可是又被其他线程所修改
     if (haveOld  &&  *location != oldObj) {
         SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
         goto retry;
@@ -302,12 +376,21 @@ storeWeak(id *location, objc_object *newObj)
     // Prevent a deadlock between the weak reference machinery
     // and the +initialize machinery by ensuring that no 
     // weakly-referenced object has an un-+initialized isa.
+    
+    // 防止弱引用间死锁
+    // 并且通过 +initialize 初始化构造器保证所有弱引用的 isa 非空指向
     if (haveNew  &&  newObj) {
+        
+        // 获得新对象的 isa 指针
         Class cls = newObj->getIsa();
+        // 判断 isa 非空且已经初始化
         if (cls != previouslyInitializedClass  &&  
             !((objc_class *)cls)->isInitialized()) 
         {
+            // 解锁
             SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
+            
+            // 对其 isa 指针进行初始化
             _class_initialize(_class_getNonMetaClass(cls, (id)newObj));
 
             // If this class is finished with +initialize then we're good.
@@ -316,34 +399,49 @@ storeWeak(id *location, objc_object *newObj)
             // then we may proceed but it will appear initializing and 
             // not yet initialized to the check above.
             // Instead set previouslyInitializedClass to recognize it on retry.
+            
+            // 如果该类已经完成执行 +initialize 方法是最理想情况
+            // 如果该类 +initialize 在线程中
+            // 例如 +initialize 正在调用 storeWeak 方法
+            // 需要手动对其增加保护策略，并设置 previouslyInitializedClass 指针进行标记
             previouslyInitializedClass = cls;
-
+            
+            // 重新尝试
             goto retry;
         }
     }
 
     // Clean up old value, if any.
+    // ② 清除旧值
     if (haveOld) {
+        /// 阅读代码时先看 weak_register_no_lock部分在看weak_unregister_no_lock。
+        /// weak_register_no_lock是从无到有的过程涉及的信息较多
         weak_unregister_no_lock(&oldTable->weak_table, oldObj, location);
     }
 
     // Assign new value, if any.
+    // ③ 分配新值
     if (haveNew) {
         newObj = (objc_object *)
             weak_register_no_lock(&newTable->weak_table, (id)newObj, location, 
                                   crashIfDeallocating);
         // weak_register_no_lock returns nil if weak store should be rejected
+        // 如果弱引用被释放 weak_register_no_lock 方法返回 nil
 
         // Set is-weakly-referenced bit in refcount table.
         if (newObj  &&  !newObj->isTaggedPointer()) {
+            /// 完成弱引用注册后，新对象newObj需要调用setWeaklyReferenced_nolock(...)方法标记对象被弱引用
+            /// 因为对象在析构时，若对象被弱引用，则需要将这些弱引用全部置nil
             newObj->setWeaklyReferenced_nolock();
         }
 
         // Do not set *location anywhere else. That would introduce a race.
+        // 之前不要设置 location 对象，这里需要更改指针指向
         *location = (id)newObj;
     }
     else {
         // No new value. The storage is not changed.
+        // 没有新值，则无需更改
     }
     
     SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
@@ -406,11 +504,15 @@ objc_storeWeakOrNil(id *location, id newObj)
 id
 objc_initWeak(id *location, id newObj)
 {
+    // 查看对象实例是否有效
+    // 无效对象直接导致指针释放
     if (!newObj) {
         *location = nil;
         return nil;
     }
-
+    
+    // 这里传递了三个 bool 数值
+    // 使用 template 进行常量参数传递是为了优化性能  C++的模板语法: 模板中可以携带参数,此处应该就是模板中携带参数
     return storeWeak<DontHaveOld, DoHaveNew, DoCrashIfDeallocating>
         (location, (objc_object*)newObj);
 }

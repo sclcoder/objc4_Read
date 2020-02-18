@@ -10,10 +10,13 @@
 #import <objc/message.h>
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
-        Class newClass = objc_allocateClassPair(objc_getClass("NSObject"), "newClass", 0);
-                objc_registerClassPair(newClass);
-        id newObject = [[newClass alloc]init];
-        NSLog(@"%@",newObject);
+          NSObject *p = [[NSObject alloc] init];
+          __weak NSObject *p1 = p;
     }
     return 0;
 }
+
+
+
+
+

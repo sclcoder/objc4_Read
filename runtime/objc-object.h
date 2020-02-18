@@ -363,16 +363,18 @@ objc_object::setWeaklyReferenced_nolock()
  retry:
     isa_t oldisa = LoadExclusive(&isa.bits);
     isa_t newisa = oldisa;
-    if (slowpath(!newisa.nonpointer)) {
+    if (slowpath(!newisa.nonpointer)) { /// 只使用SideTable保存对象引用计数
         ClearExclusive(&isa.bits);
+        // 则调用sidetable_setWeaklyReferenced_nolock()方法，只是简单设置了SideTable的refcnts中该对象的引用计数信息的弱引用标记位为1
         sidetable_setWeaklyReferenced_nolock();
+        
         return;
     }
     if (newisa.weakly_referenced) {
         ClearExclusive(&isa.bits);
         return;
     }
-    newisa.weakly_referenced = true;
+    newisa.weakly_referenced = true; /// 标记对象被弱引用
     if (!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)) goto retry;
 }
 
