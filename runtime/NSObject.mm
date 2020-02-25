@@ -678,15 +678,20 @@ objc_moveWeak(id *dst, id *src)
 /***********************************************************************
    Autorelease pool implementation
 
-   A thread's autorelease pool is a stack of pointers. 
+   A thread's autorelease pool is a stack of pointers.
+   线程的自动释放池是个指针栈
    Each pointer is either an object to release, or POOL_BOUNDARY which is 
      an autorelease pool boundary.
+   每个指针要么指向要释放的对象，要么指向POOL_BOUNDARY（自动释放池的边界）
    A pool token is a pointer to the POOL_BOUNDARY for that pool. When 
-     the pool is popped, every object hotter than the sentinel is released.
+     the pool is popped, every object hotter than the sentinel(哨兵) is released.
+   一个池的token是指向该池子的POOL_BOUNDARY的指针。当池子出栈,每个比这个哨兵(token)hotter的对象会被释放
    The stack is divided into a doubly-linked list of pages. Pages are added 
-     and deleted as necessary. 
+     and deleted as necessary.
+   该栈是由是pages组成双向链表结构.pages会被根据需要添加或删除
    Thread-local storage points to the hot page, where newly autoreleased 
-     objects are stored. 
+     objects are stored.
+   线程存储指向hotPage的指针，先创建的自动释放的对象存储在此。
 **********************************************************************/
 
 // Set this to 1 to mprotect() autorelease pool contents
@@ -705,7 +710,7 @@ struct magic_t {
     static const uint32_t M0 = 0xA1A1A1A1;
 #   define M1 "AUTORELEASE!"
     static const size_t M1_len = 12;
-    uint32_t m[4];
+    uint32_t m[4]; /// 4 * 4 = 16个字节
     
     magic_t() {
         assert(M1_len == strlen(M1));
@@ -734,6 +739,22 @@ struct magic_t {
 #   undef M1
 };
     
+/***
+ 
+ 此处指看了关于AutoreleasePoolPage的源码,AutoreleasePoolPage与RunLoop也有密切的关系,这部分内容需要看RunLoop的源码
+ 
+ Autorelease pool 与 RunLoop 也有非常紧密的关系。App 启动后再主线程 RunLoop 会注册两个 Observer
+ 第一个 Observer 监听 Entry 事件，其回调会调用objc_autoreleasePoolPush()函数创建自动释放池；
+ 第二个Observer监听两个事件，监听到BeforeWaiting（即将进入休眠）时调用objc_autoreleasePoolPop()函数释放旧的 autorelease pool
+ 并调用objc_autoreleasePoolPush()函数建立新的 autorelease pool ；
+ 监听到 Exit 事件时，调用objc_autoreleasePoolPop(void *ctxt)函数释放 autorelease pool （顺便一提：调用pop传入的ctxt参数实际上是调用push新建 autorelease pool 时返回的POOL_BOUNDARY的地址）。
+ 
+ 注意:
+ 1.runloop自动创建自动释放池
+ 2.手动创建 @autoreleasepool{ \\添加需要自动释放的对象  }
+ 
+ ***/
+
 
 class AutoreleasePoolPage 
 {
@@ -741,9 +762,10 @@ class AutoreleasePoolPage
     // pushed and it has never contained any objects. This saves memory 
     // when the top level (i.e. libdispatch) pushes and pops pools but 
     // never uses them.
+    /// 当仅推入一个池且从未包含任何对象时，EMPTY_POOL_PLACEHOLDER就会存储在TLS中。当顶层（即libdispatch）推送并弹出池但从不使用它们时，这样可以节省内存。
 #   define EMPTY_POOL_PLACEHOLDER ((id*)1)
 
-#   define POOL_BOUNDARY nil
+#   define POOL_BOUNDARY nil  /// 边界
     static pthread_key_t const key = AUTORELEASE_POOL_KEY;
     static uint8_t const SCRIBBLE = 0xA3;  // 0xA3A3A3A3 after releasing
     static size_t const SIZE = 
@@ -754,19 +776,29 @@ class AutoreleasePoolPage
 #endif
     static size_t const COUNT = SIZE / sizeof(id);
 
-    magic_t const magic;
-    id *next;
-    pthread_t const thread;
-    AutoreleasePoolPage * const parent;
-    AutoreleasePoolPage *child;
-    uint32_t const depth;
-    uint32_t hiwat;
+    magic_t const magic; ///16字节  校验
+    id *next; ///8 指向AutoreleasePoolPage中下一个可分配的地址
+    pthread_t const thread; /// 8
+    AutoreleasePoolPage * const parent; /// 8 指向当前节点的上一个AutoreleasePoolPage节点，若parent为null则表示该节点为双向链表的开始节点
+    AutoreleasePoolPage *child; /// 8 下一个AutoreleasePoolPage节点
+    uint32_t const depth; /// 4 当前AutoreleasePoolPage节点在链表中的位置
+    uint32_t hiwat; /// 4 校验
 
     // SIZE-sizeof(*this) bytes of contents follow
-
+    
+    /**
+     AutoreleasePoolPage重载了new运算符，指定构建AutoreleasePoolPage实例分配定长的4096字节内存空间
+     #define I386_PGBYTES            4096
+     #define PAGE_SIZE               I386_PGBYTES
+     #define PAGE_MAX_SIZE           PAGE_SIZE
+     
+     */
+    
+    /// 重载new运算符
     static void * operator new(size_t size) {
         return malloc_zone_memalign(malloc_default_zone(), SIZE, SIZE);
     }
+    /// 重载delete运算符
     static void operator delete(void * p) {
         return free(p);
     }
@@ -784,7 +816,7 @@ class AutoreleasePoolPage
         mprotect(this, SIZE, PROT_READ | PROT_WRITE);
 #endif
     }
-
+    /// C++ 构造函数初始化列表：构造函数初始化列表以一个冒号开始，接着是以逗号分隔的数据成员列表，每个数据成员后面跟一个放在括号中的初始化式
     AutoreleasePoolPage(AutoreleasePoolPage *newParent) 
         : magic(), next(begin()), thread(pthread_self()),
           parent(newParent), child(nil), 
@@ -831,7 +863,7 @@ class AutoreleasePoolPage
     void check(bool die = true) 
     {
         if (!magic.check() || !pthread_equal(thread, pthread_self())) {
-            busted(die);
+            busted(die); /// busted破灭
         }
     }
 
@@ -848,22 +880,27 @@ class AutoreleasePoolPage
 
 
     id * begin() {
+        /// 获取开始存放autorelrese对象的地址
         return (id *) ((uint8_t *)this+sizeof(*this));
     }
 
     id * end() {
+        /// 一个的Page的结尾
         return (id *) ((uint8_t *)this+SIZE);
     }
 
     bool empty() {
+        /// 没有存放autorelrese对象
         return next == begin();
     }
 
-    bool full() { 
+    bool full() {
+        /// 该Page满了
         return next == end();
     }
 
     bool lessThanHalfFull() {
+        /// 是否少于一半
         return (next - begin() < (end() - begin()) / 2);
     }
 
@@ -872,20 +909,22 @@ class AutoreleasePoolPage
         assert(!full());
         unprotect();
         id *ret = next;  // faster than `return next-1` because of aliasing
-        *next++ = obj;
+        *next++ = obj; /// next指向下一个存储位置
         protect();
         return ret;
     }
 
     void releaseAll() 
     {
-        releaseUntil(begin());
+        releaseUntil(begin());/// 释放到链表的头结点
     }
 
     void releaseUntil(id *stop) 
     {
         // Not recursive: we don't want to blow out the stack 
         // if a thread accumulates a stupendous amount of garbage
+        //不是递归的：我们不想炸毁堆栈
+        //如果一个线程累积了大量的垃圾
         
         while (this->next != stop) {
             // Restart from hotPage() every time, in case -release 
@@ -899,6 +938,8 @@ class AutoreleasePoolPage
             }
 
             page->unprotect();
+            
+            /// 从Page的next指针上一个位置开始释放直到next指向stop
             id obj = *--page->next;
             memset((void*)page->next, SCRIBBLE, sizeof(*page->next));
             page->protect();
@@ -918,6 +959,7 @@ class AutoreleasePoolPage
 #endif
     }
 
+    /// 把当前page的所有child链重置为nil
     void kill() 
     {
         // Not recursive: we don't want to blow out the stack 
@@ -966,13 +1008,16 @@ class AutoreleasePoolPage
         return pageForPointer((uintptr_t)p);
     }
 
+    /// 根据地址查找AutoreleasePoolPage
     static AutoreleasePoolPage *pageForPointer(uintptr_t p) 
     {
         AutoreleasePoolPage *result;
+        /// 获取偏移量,SIZE为4096个字节每个AutoreleasePoolPage的大小为4096
         uintptr_t offset = p % SIZE;
 
         assert(offset >= sizeof(AutoreleasePoolPage));
-
+        
+        /// 获取该AutoreleasePoolPage的地址（按照4096对齐,所以AutoreleasePoolPage地址一定是4096的倍数）
         result = (AutoreleasePoolPage *)(p - offset);
         result->fastcheck();
 
@@ -993,8 +1038,18 @@ class AutoreleasePoolPage
         return EMPTY_POOL_PLACEHOLDER;
     }
 
+    /// hotPage 保存 autorelease pool 当前所分配到的AutoreleasePoolPage；
+    
     static inline AutoreleasePoolPage *hotPage() 
     {
+        /**
+         tls_get_direct()、tls_set_direct()函数分别通过pthread_getspecific()、pthread_setspecific()函数，使用Key-Value方式访问线程的私有空间。
+         显然 hotPage 是与线程关联的，在不同的线程上调用AutoreleasePoolPage类的hotPage()静态方法返回的是不同的AutoreleasePoolPage实例。
+         代码中的key是AutoreleasePoolPage的一个const静态变量。
+         
+         英文为Thread Local Storage [1]  ，缩写为TLS。为什么要有TLS？原因在于，全局变量与函数内定义的静态变量，是各个线程都可以访问的共享变量。
+         如果需要在一个线程内部的各个函数调用都能访问、但其它线程不能访问的变量（被称为static memory local to a thread 线程局部静态变量），就需要新的机制来实现。这就是TLS。
+         */
         AutoreleasePoolPage *result = (AutoreleasePoolPage *)
             tls_get_direct(key);
         if ((id *)result == EMPTY_POOL_PLACEHOLDER) return nil;
@@ -1008,7 +1063,8 @@ class AutoreleasePoolPage
         tls_set_direct(key, (void *)page);
     }
 
-    static inline AutoreleasePoolPage *coldPage() 
+    /// coldPage 是从 hotPage 开始沿parent指针链回溯找到的第一个分配的AutoreleasePoolPage。
+    static inline AutoreleasePoolPage *coldPage() /// 链表的首page
     {
         AutoreleasePoolPage *result = hotPage();
         if (result) {
@@ -1021,14 +1077,15 @@ class AutoreleasePoolPage
     }
 
 
+    /// 添加对象到自动释放池
     static inline id *autoreleaseFast(id obj)
     {
-        AutoreleasePoolPage *page = hotPage();
-        if (page && !page->full()) {
+        AutoreleasePoolPage *page = hotPage(); /// 获取当前page
+        if (page && !page->full()) { /// 没满就直接添加
             return page->add(obj);
-        } else if (page) {
+        } else if (page) { /// Page满了
             return autoreleaseFullPage(obj, page);
-        } else {
+        } else { /// 没有Page
             return autoreleaseNoPage(obj);
         }
     }
@@ -1041,13 +1098,13 @@ class AutoreleasePoolPage
         // Then add the object to that page.
         assert(page == hotPage());
         assert(page->full()  ||  DebugPoolAllocation);
-
+        /// 获取下一个page,如果都满了就创建新page
         do {
             if (page->child) page = page->child;
             else page = new AutoreleasePoolPage(page);
         } while (page->full());
 
-        setHotPage(page);
+        setHotPage(page); /// 设置为hotPage
         return page->add(obj);
     }
 
@@ -1066,7 +1123,7 @@ class AutoreleasePoolPage
             // that is currently represented by the empty placeholder.
             pushExtraBoundary = true;
         }
-        else if (obj != POOL_BOUNDARY  &&  DebugMissingPools) {
+        else if (obj != POOL_BOUNDARY  &&  DebugMissingPools) { /// 注意: POOL_BOUNDARY值是nil
             // We are pushing an object with no pool in place, 
             // and no-pool debugging was requested by environment.
             _objc_inform("MISSING POOLS: (%p) Object %p of class %s "
@@ -1074,6 +1131,7 @@ class AutoreleasePoolPage
                          "just leaking - break on "
                          "objc_autoreleaseNoPool() to debug", 
                          pthread_self(), (void*)obj, object_getClassName(obj));
+            
             objc_autoreleaseNoPool(obj);
             return nil;
         }
@@ -1087,16 +1145,18 @@ class AutoreleasePoolPage
         // We are pushing an object or a non-placeholder'd pool.
 
         // Install the first page.
+        
+        /// 创建链表中的第一个Page,并设置为hotpage
         AutoreleasePoolPage *page = new AutoreleasePoolPage(nil);
         setHotPage(page);
         
         // Push a boundary on behalf of the previously-placeholder'd pool.
         if (pushExtraBoundary) {
-            page->add(POOL_BOUNDARY);
+            page->add(POOL_BOUNDARY); /// 添加哨兵对象POOL_BOUNDARY（nil）
         }
         
         // Push the requested object or pool.
-        return page->add(obj);
+        return page->add(obj); /// 添加需要自动释放的对象
     }
 
 
@@ -1108,8 +1168,9 @@ class AutoreleasePoolPage
         else return autoreleaseNoPage(obj);
     }
 
+    /// AutoreleasePoolPage类的public方法
 public:
-    static inline id autorelease(id obj)
+    static inline id autorelease(id obj) /// 添加到pool中
     {
         assert(obj);
         assert(!obj->isTaggedPointer());
@@ -1122,11 +1183,13 @@ public:
     static inline void *push() 
     {
         id *dest;
-        if (DebugPoolAllocation) {
+        if (DebugPoolAllocation) { /// 调试相关忽略
             // Each autorelease pool starts on a new pool page.
             dest = autoreleaseNewPage(POOL_BOUNDARY);
         } else {
             dest = autoreleaseFast(POOL_BOUNDARY);
+            /// push一个POOL_BOUNDARY（哨兵对象，page中存放这个哨兵对象的地址，哨兵对象指向nil）
+            /// 在pop时,会传入这个POOL_BOUNDARY参数，然后从前到后直到遇到POOL_BOUNDARY时停止释放假如释放池的对象
         }
         assert(dest == EMPTY_POOL_PLACEHOLDER || *dest == POOL_BOUNDARY);
         return dest;
@@ -1157,7 +1220,9 @@ public:
         objc_autoreleasePoolInvalid(token);
     }
     
-    static inline void pop(void *token) 
+    /// 该token是一个POOL_BOUNDARY,每次push时都会在pool中添加一个POOL_BOUNDARY.
+    /// 一对pop\push操作是使用同一个POOL_BOUNDARY
+    static inline void pop(void *token)
     {
         AutoreleasePoolPage *page;
         id *stop;
@@ -1175,8 +1240,11 @@ public:
             return;
         }
 
-        page = pageForPointer(token);
+        page = pageForPointer(token); /// 获取token所在的Page
         stop = (id *)token;
+        
+        
+// MARK: 没看懂啊！！！
         if (*stop != POOL_BOUNDARY) {
             if (stop == page->begin()  &&  !page->parent) {
                 // Start of coldest page may correctly not be POOL_BOUNDARY:
@@ -1189,9 +1257,9 @@ public:
             }
         }
 
-        if (PrintPoolHiwat) printHiwat();
+        if (PrintPoolHiwat) printHiwat(); /// 调试相关忽略
 
-        page->releaseUntil(stop);
+        page->releaseUntil(stop); /// 释放对象直到stop这个哨兵的位置
 
         // memory: delete empty children
         if (DebugPoolAllocation  &&  page->empty()) {
@@ -1207,6 +1275,9 @@ public:
         } 
         else if (page->child) {
             // hysteresis: keep one empty child if page is more than half full
+            /// 当前page只留下一个child链
+            /// 因为现在链表中的存储autorelease对象的page只有当前的这个page了,剩下的pagek可以移除，
+            /// 为了提高效率，避免频繁的创建新的page,这里根据情况保留1-2个空的page
             if (page->lessThanHalfFull()) {
                 page->child->kill();
             }
