@@ -116,6 +116,21 @@ void vsyslog(int, const char *, va_list) UNAVAILABLE_ATTRIBUTE;
 #define ALWAYS_INLINE inline __attribute__((always_inline))
 #define NEVER_INLINE inline __attribute__((noinline))
 
+
+
+/**
+ 这个指令是gcc引入的，作用是"允许程序员将最有可能执行的分支告诉编译器"。
+ 这个指令的写法为：__builtin_expect(EXP, N)。
+ 意思是：EXP==N的概率很大。一般的使用方法是将__builtin_expect指令封装为fastpath和slowpath宏。
+
+ __builtin_expect((x),1)表示 x 的值为真的可能性更大；
+ __builtin_expect((x),0)表示 x 的值为假的可能性更大。
+ 也就是说，使用fastpath()，执行 if 后面的语句的机会更大，使用 slowpath()，执行 else 后面的语句的机会更大。通过这种方式，编译器在编译过程中，会将可能性更大的代码紧跟着起面的代码，从而减少指令跳转带来的性能上的下降。
+
+ 作者：大明白
+ 链接：https://www.jianshu.com/p/2684613a300f
+ 
+ */
 #define fastpath(x) (__builtin_expect(bool(x), 1))
 #define slowpath(x) (__builtin_expect(bool(x), 0))
 

@@ -438,9 +438,12 @@ objc_object::rootDealloc()
 inline id 
 objc_object::retain()
 {
-    assert(!isTaggedPointer());
-
-    if (fastpath(!ISA()->hasCustomRR())) {
+    assert(!isTaggedPointer()); /// 不是TaggedPointer
+    /**
+     class or superclass has default retain/release/autorelease/retainCount/_tryRetain/_isDeallocating/retainWeakReference/allowsWeakReference
+     hasCustomRR() 用于判定对象是否有自定义的retain函数指针
+     **/
+    if (fastpath(!ISA()->hasCustomRR())) { /// 大概率执行此处的代码
         return rootRetain();
     }
 
@@ -472,9 +475,11 @@ objc_object::rootTryRetain()
 ALWAYS_INLINE id 
 objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 {
+    /// 如果是tagged pointer，直接返回this，因为tagged pointer不用记录引用次数
     if (isTaggedPointer()) return (id)this;
 
     bool sideTableLocked = false;
+    // transcribeToSideTable用于表示extra_rc是否溢出，默认为false      transcribe:转录
     bool transcribeToSideTable = false;
 
     isa_t oldisa;
@@ -482,40 +487,63 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 
     do {
         transcribeToSideTable = false;
-        oldisa = LoadExclusive(&isa.bits);
+        oldisa = LoadExclusive(&isa.bits); /// 将isa_t提取出来
         newisa = oldisa;
-        if (slowpath(!newisa.nonpointer)) {
+        if (slowpath(!newisa.nonpointer)) {  /// 小概率执行此处代码: 是未经优化的isa概率很小
             ClearExclusive(&isa.bits);
-            if (!tryRetain && sideTableLocked) sidetable_unlock();
+            
+            if (!tryRetain && sideTableLocked) sidetable_unlock(); /// sideTable解锁
+            
             if (tryRetain) return sidetable_tryRetain() ? (id)this : nil;
+            
             else return sidetable_retain();
         }
+        
+        
+        // 如果对象正在释放，则直接返回nil
         // don't check newisa.fast_rr; we already called any RR overrides
-        if (slowpath(tryRetain && newisa.deallocating)) {
+        if (slowpath(tryRetain && newisa.deallocating)) { /// 小概率执行此处代码
             ClearExclusive(&isa.bits);
             if (!tryRetain && sideTableLocked) sidetable_unlock();
             return nil;
         }
+    
+        // 采用了isa优化，做extra_rc++，同时检查是否extra_rc溢出，若溢出，则extra_rc减半，并将另一半转存至sidetable
         uintptr_t carry;
         newisa.bits = addc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc++
 
-        if (slowpath(carry)) {
+        if (slowpath(carry)) { /// 有carry值，表示extra_rc 溢出
             // newisa.extra_rc++ overflowed
             if (!handleOverflow) {
+                // 如果不处理溢出情况，则在这里会递归调用一次，再进来的时候，
+                // handleOverflow会被rootRetain_overflow设置为true，从而进入到下面的溢出处理流程
                 ClearExclusive(&isa.bits);
                 return rootRetain_overflow(tryRetain);
             }
             // Leave half of the retain counts inline and 
             // prepare to copy the other half to the side table.
             if (!tryRetain && !sideTableLocked) sidetable_lock();
+            
+            
+            // 进行溢出处理：逻辑很简单，先在extra_rc中引用计数减半，同时把has_sidetable_rc设置为true，表明借用了sidetable。
+            // 然后把另一半放到sidetable中
             sideTableLocked = true;
             transcribeToSideTable = true;
-            newisa.extra_rc = RC_HALF;
+            
+            newisa.extra_rc = RC_HALF; /// define RC_HALF  (1ULL<<18) 保留一半值在extra_rc（19bit）中,其他的一半值需要转录到sidetable中
             newisa.has_sidetable_rc = true;
+            /**
+             在iOS中，extra_rc占有19位，也就是最大能够表示2^19-1, 用二进制表示就是19个1。当extra_rc等于2^19时，溢出，此时的二进制位是一个1后面跟19个0， 即10000…00。将会溢出的值2^19除以2，相当于将10000…00向右移动一位。也就等于RC_HALF(1ULL<<18)，即一个1后面跟18个0
+             */
+            
+            
         }
+        /// 将oldisa 替换为 newisa，并赋值给isa.bits(更新isa_t), 如果不成功，do while再试一遍
     } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)));
+    
 
-    if (slowpath(transcribeToSideTable)) {
+    if (slowpath(transcribeToSideTable)) { /// 小概率
+        ///isa的extra_rc溢出，将一半的refer count值放到sidetable中
         // Copy the other half of the retain counts to the side table.
         sidetable_addExtraRC_nolock(RC_HALF);
     }

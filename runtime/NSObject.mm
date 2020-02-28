@@ -89,10 +89,11 @@ typedef objc::DenseMap<DisguisedPtr<objc_object>,size_t,true> RefcountMap;
 enum HaveOld { DontHaveOld = false, DoHaveOld = true };
 enum HaveNew { DontHaveNew = false, DoHaveNew = true };
 
+/// 根据SideTables的结构我们知道全局共有8或64张SideTable。一张SideTable会管理多个对象，而并非一个。
 struct SideTable {
-    spinlock_t slock; /// 自旋锁,锁的定义放在了实际的类型中
-    RefcountMap refcnts; /// 存放引用计数的全局hash表
-    weak_table_t weak_table; /// 存放弱引用的全局hash表
+    spinlock_t slock; /// 自旋锁:实际类型为os_unfair_lock. 防止多线程访问SideTable冲突
+    RefcountMap refcnts; /// 存放引用计数的hash表
+    weak_table_t weak_table; /// 存放弱引用的hash表
 
     SideTable() { /// 构造函数
         memset(&weak_table, 0, sizeof(weak_table)); /// 初始化weak_table
@@ -193,6 +194,29 @@ static void SideTableInit() {
     我们看到SideTables本质上StripedMap类型。其中包含的元素为SideTable类型
     这里的reinterpret_cast关键字，我们可以理解为强制类型转换，也就是将SideTableBuf转换为
     StripedMap类型，其中包含的元素为SideTale类型。
+ 
+ 
+ !important:
+ 
+ Side Tables() 结构是什么？
+
+ 在他的结构下面挂了很多 Side Table 数据结构，这些数据结构在不同的架构上面是有不同个数的，比如在非嵌入式系统当中，Side Table 这个表一共有 64 个，在这里解释一下，Side Tables() 实际上是一个哈希表，可以通过一个对象指针来具体找到它对应的引用计数表或者说弱引用表在哪一张具体的 Side Table 当中
+
+ 
+ 如说只有一张 SideTable ，那么在内存中分配的所有对象的引用计数或者说弱引用存储都放到一张大表当中，这个时候如果说要操作某一个对象的引用计数值进行修改，比如说加一减一的操作，由于所有的对象可能是在不同的线程当中去分配创建的，包括调用他们的 retain，release等方法也可能是在不同线程当中操作的，那么这个时候再对这张表进行操作的时候，需要进行加锁处理才能保证对数据的访问安全，在这个过程当中就存在了效率问题，如果现在已经有一个对象在操作这张表，那么下一个对象就要等前一个对象操作完后把锁释放之后它才能操作这张表
+ 
+ 
+ 系统为了解决效率问题引用了分离锁的技术方案
+ 
+ 可以把内存对象所对应的引用技术表可以分拆成多个部分，比如说把它分拆成8个，分拆成8个需要对这8个表分别加锁
+ 比如说某一个对象A在第一张表里面，另一个对象B在另一张表中，那么当A和B同时进行引用计数操作的时候可以并发操作，但是如果按照一张表的情况下他们就需要顺序操作
+ 
+ 
+ 怎样实现快速分流？
+
+ 快速分流指的是通过一个对象的指针如何快速的定位到它属于哪张 side Table 表？
+ side Tables 的本质是一张哈希表，这张哈希表当中可能有64张具体的 side Table ，然后存储不同对象的引用计数表和弱引用表
+ 
  */
 static StripedMap<SideTable>& SideTables() { /// 返回指向StripedMap<SideTable>的隐式指针
     
@@ -277,7 +301,7 @@ objc_retain_autorelease(id obj)
     return objc_autorelease(objc_retain(obj));
 }
 
-
+/// 与引用计数相关
 void
 objc_storeStrong(id *location, id obj)
 {
@@ -285,7 +309,7 @@ objc_storeStrong(id *location, id obj)
     if (obj == prev) {
         return;
     }
-    objc_retain(obj);
+    objc_retain(obj); /// 引用计数+1
     *location = obj;
     objc_release(prev);
 }
@@ -1587,10 +1611,22 @@ objc_object::sidetable_retain()
 #endif
     SideTable& table = SideTables()[this];
     
+    /**
+     
+     #define SIDE_TABLE_WEAKLY_REFERENCED (1UL<<0)
+     #define SIDE_TABLE_DEALLOCATING      (1UL<<1)  // MSB-ward of weak bit
+     #define SIDE_TABLE_RC_ONE            (1UL<<2)  // MSB-ward of deallocating bit
+     #define SIDE_TABLE_RC_PINNED         (1UL<<(WORD_BITS-1))
+     
+     */
+    
     table.lock();
     size_t& refcntStorage = table.refcnts[this];
     if (! (refcntStorage & SIDE_TABLE_RC_PINNED)) {
-        refcntStorage += SIDE_TABLE_RC_ONE;
+        /// #define SIDE_TABLE_RC_PINNED (1UL<<(64-1))
+        /// 0100 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000 0000 0000 0000 0000 0000
+        /// 判断refcntStorage的第63位是否为0,为0说明没有溢出
+        refcntStorage += SIDE_TABLE_RC_ONE; /// 引用计数+1,引用计数的值从第二位开始存储的,第0位和第1位有其他定义
     }
     table.unlock();
 
@@ -1604,11 +1640,13 @@ objc_object::sidetable_tryRetain()
 #if SUPPORT_NONPOINTER_ISA
     assert(!isa.nonpointer);
 #endif
+    
     SideTable& table = SideTables()[this];
 
     // NO SPINLOCK HERE
     // _objc_rootTryRetain() is called exclusively by _objc_loadWeak(), 
     // which already acquired the lock on our behalf.
+    // 这里不加锁的原因:_objc_rootTryRetain()明确的被_objc_loadWeak()调用,_objc_loadWeak()中已经加锁了
 
     // fixme can't do this efficiently with os_lock_handoff_s
     // if (table.slock == 0) {
@@ -1618,11 +1656,12 @@ objc_object::sidetable_tryRetain()
     bool result = true;
     RefcountMap::iterator it = table.refcnts.find(this);
     if (it == table.refcnts.end()) {
-        table.refcnts[this] = SIDE_TABLE_RC_ONE;
-    } else if (it->second & SIDE_TABLE_DEALLOCATING) {
+        table.refcnts[this] = SIDE_TABLE_RC_ONE;  /// #define SIDE_TABLE_RC_ONE  (1UL<<2)
+    } else if (it->second & SIDE_TABLE_DEALLOCATING) { /// #define SIDE_TABLE_DEALLOCATING (1UL<<1)
         result = false;
-    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) {
-        it->second += SIDE_TABLE_RC_ONE;
+    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) { /// #define SIDE_TABLE_RC_PINNED (1UL<<(64-1))
+        
+        it->second += SIDE_TABLE_RC_ONE; /// #define SIDE_TABLE_RC_ONE  (1UL<<2)
     }
     
     return result;
@@ -1764,7 +1803,7 @@ id
 objc_retain(id obj)
 {
     if (!obj) return obj;
-    if (obj->isTaggedPointer()) return obj;
+    if (obj->isTaggedPointer()) return obj; /// 是否是taggedPointer
     return obj->retain();
 }
 

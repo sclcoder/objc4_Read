@@ -93,16 +93,18 @@ union isa_t {
          #   define ISA_MASK        0x0000000ffffffff8ULL
          #   define ISA_MAGIC_MASK  0x000003f000000001ULL
          #   define ISA_MAGIC_VALUE 0x000001a000000001ULL
-         #   define ISA_BITFIELD                                                      \
-               uintptr_t nonpointer        : 1;                                       \
-               uintptr_t has_assoc         : 1;                                       \
-               uintptr_t has_cxx_dtor      : 1;                                       \
-               uintptr_t shiftcls          : 33;                                      \
-               uintptr_t magic             : 6;                                       \
-               uintptr_t weakly_referenced : 1;                                       \
-               uintptr_t deallocating      : 1;                                       \
-               uintptr_t has_sidetable_rc  : 1;                                       \
-               uintptr_t extra_rc          : 19
+         #   define ISA_BITFIELD
+               uintptr_t nonpointer        : 1;  是否开启isa优化
+               uintptr_t has_assoc         : 1;  是否有关联对象
+               uintptr_t has_cxx_dtor      : 1;  是否有c++析构
+               uintptr_t shiftcls          : 33;
+               uintptr_t magic             : 6;
+               uintptr_t weakly_referenced : 1;  是否有弱引用变量
+               uintptr_t deallocating      : 1;  对象是否正在被释放
+               uintptr_t has_sidetable_rc  : 1;  是否开启了sidetable记录引用计数
+               uintptr_t extra_rc          : 19  值为引用计数-1
+                                                 其实在绝大多数情况下，仅用优化的isa_t来记录对象的引用计数就足够了。
+                                                 只有在19位的extra_rc盛放不了那么大的引用计数时，才会借助SideTable出马。
          #   define RC_ONE   (1ULL<<45)
          #   define RC_HALF  (1ULL<<18)
          */
@@ -796,7 +798,7 @@ enum { CacheLineSize = 64 };
 template<typename T>
 class StripedMap {
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-    enum { StripeCount = 8 };
+    enum { StripeCount = 8 }; /// ios中共有8个SideTable
 #else
     enum { StripeCount = 64 };
 #endif
@@ -806,13 +808,13 @@ class StripedMap {
         ///alignas什么是对齐?   举例说明，某个int类型的对象，要求其存储地址的特征是4的整倍数
     };
 
-    PaddedT array[StripeCount]; ///存放PaddedT结构的数组
+    PaddedT array[StripeCount]; ///在iOS中array是一个长度为8的数组，T类型强制为64位对齐。
     
     ///主要还是调用了reinterpret_cast将传入的对象地址进行类型转换的，并通过一定算法计算出指针的index，最后的%StripeCount保证保证了index不会越界
     static unsigned int indexForPointer(const void *p) {
         // 将p的值以二进制的方式解释为uintptr_t（unsigned long）并赋值给addr
         uintptr_t addr = reinterpret_cast<uintptr_t>(p);
-        // 哈希函数
+        // 哈希函数: 这里 %StripeCount 保证了所有的对象对应的SideTable均在这个8/64长度数组中。
         return ((addr >> 4) ^ (addr >> 9)) % StripeCount;
     }
 
