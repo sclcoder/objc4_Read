@@ -58,15 +58,54 @@ namespace {
 
 #include "isa.h"
 
+/// isa_t的联合类型
 union isa_t {
+    /// 构造函数
     isa_t() { }
     isa_t(uintptr_t value) : bits(value) { }
+    
+    
+    /**
+     isa_t 中包含有cls，bits， struct三个变量，它们的内存空间是重叠的。在实际使用时，仅能够使用它们中的一种，你把它当做cls，就不能当bits访问，你把它当bits，就不能用cls来访问。
+     
+     由于uintptr_t bits 和 struct 都是占据64位内存，因此它们的内存空间是完全重叠的。而你将这块64位内存当做是uintptr_t bits 还是 struct，则完全是逻辑上的区分，在内存空间上，其实是一个东西。
+     即uintptr_t bits 和 struct 是一个东西的两种表现形式。
+     
+     
+     uintptr_t bits 和 struct 的关系可以看做，uintptr_t bits 向外提供了操作struct 的接口
+     struct 本身则说明了uintptr_t bits 中各个二进制位的定义。
+     */
 
-    Class cls;
-    uintptr_t bits;
+    
+    /// 未启用isa优化
+    Class cls; /// objc_class *类型的指针 在64位的CPU架构中8个字节64bit
+    /// 启用isa优化
+    uintptr_t bits; /// unsigned long 在64位的CPU架构中占8个字节即64bit
+    
+    /// 结构体:64bit。 对bits的每一位的说明
 #if defined(ISA_BITFIELD)
     struct {
-        ISA_BITFIELD;  // defined in isa.h
+        ISA_BITFIELD;  // defined in isa.
+        /**
+         ISA_BITFIELD定义如下
+         
+         # if __arm64__
+         #   define ISA_MASK        0x0000000ffffffff8ULL
+         #   define ISA_MAGIC_MASK  0x000003f000000001ULL
+         #   define ISA_MAGIC_VALUE 0x000001a000000001ULL
+         #   define ISA_BITFIELD                                                      \
+               uintptr_t nonpointer        : 1;                                       \
+               uintptr_t has_assoc         : 1;                                       \
+               uintptr_t has_cxx_dtor      : 1;                                       \
+               uintptr_t shiftcls          : 33;                                      \
+               uintptr_t magic             : 6;                                       \
+               uintptr_t weakly_referenced : 1;                                       \
+               uintptr_t deallocating      : 1;                                       \
+               uintptr_t has_sidetable_rc  : 1;                                       \
+               uintptr_t extra_rc          : 19
+         #   define RC_ONE   (1ULL<<45)
+         #   define RC_HALF  (1ULL<<18)
+         */
     };
 #endif
 };
