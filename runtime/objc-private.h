@@ -89,6 +89,17 @@ union isa_t {
         /**
          ISA_BITFIELD定义如下
          
+         // extra_rc must be the MSB-most field (so it matches carry/overflow flags)
+         // nonpointer must be the LSB (fixme or get rid of it)
+         // shiftcls must occupy the same bits that a real class pointer would
+         // bits + RC_ONE is equivalent to extra_rc + 1
+         // RC_HALF is the high bit of extra_rc (i.e. half of its range)
+
+         // future expansion:
+         // uintptr_t fast_rr : 1;     // no r/r overrides
+         // uintptr_t lock : 2;        // lock for atomic property, @synch
+         // uintptr_t extraBytes : 1;  // allocated with extra bytes
+         
          # if __arm64__
          #   define ISA_MASK        0x0000000ffffffff8ULL
          #   define ISA_MAGIC_MASK  0x000003f000000001ULL
@@ -97,10 +108,10 @@ union isa_t {
                uintptr_t nonpointer        : 1;  是否开启isa优化
                uintptr_t has_assoc         : 1;  是否有关联对象
                uintptr_t has_cxx_dtor      : 1;  是否有c++析构
-               uintptr_t shiftcls          : 33;
-               uintptr_t magic             : 6;
+               uintptr_t shiftcls          : 33  保存类的虚拟内存地址。
+               uintptr_t magic             : 6;  用于非指针类型的isa校验，arm64架构下这6位为固定值0x1a；
                uintptr_t weakly_referenced : 1;  是否有弱引用变量
-               uintptr_t deallocating      : 1;  对象是否正在被释放
+               uintptr_t deallocating      : 1;  对象是否已执行析构（对象over release相关提示）；
                uintptr_t has_sidetable_rc  : 1;  是否开启了sidetable记录引用计数
                uintptr_t extra_rc          : 19  值为引用计数-1
                                                  其实在绝大多数情况下，仅用优化的isa_t来记录对象的引用计数就足够了。
@@ -795,6 +806,7 @@ enum { CacheLineSize = 64 };
 
 // StripedMap<T> 是一个模板类，根据传递的实际参数决定其中 array 成员存储的元素类型。
 // 能通过对象的地址，运算出 Hash 值，通过该 hash 值找到对应的 value 。
+
 template<typename T>
 class StripedMap {
 #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
@@ -903,15 +915,16 @@ class StripedMap {
 // 注意，weak_entry_t知道这种编码。
 
 // DisguisedPtr类的定义如下。它对一个指针伪装处理，保存时装箱，调用时拆箱。可不纠结于为什么要将指针伪装，只需要知道DisguisedPtr<T>功能上等价于T*即可。
+// DisguisedPtr<T>通过运算使指针隐藏于系统工具（如LEAK工具），同时保持指针的能力，其作用是通过计算把保存的T的指针隐藏起来，实现指针到整数的全射
 template <typename T>
 class DisguisedPtr {
     uintptr_t value;
 
-    static uintptr_t disguise(T* ptr) {
+    static uintptr_t disguise(T* ptr) { //指针隐藏
         return -(uintptr_t)ptr;
     }
 
-    static T* undisguise(uintptr_t val) {
+    static T* undisguise(uintptr_t val) { //指针显露
         return (T*)-val;
     }
 

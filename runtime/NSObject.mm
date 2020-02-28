@@ -77,13 +77,20 @@ namespace {
 #define SIDE_TABLE_DEALLOCATING      (1UL<<1)  // MSB-ward of weak bit
 #define SIDE_TABLE_RC_ONE            (1UL<<2)  // MSB-ward of deallocating bit
 #define SIDE_TABLE_RC_PINNED         (1UL<<(WORD_BITS-1))
+// SIDE_TABLE_RC_PINNED是将 SideTable 中的对象的引用计数的64位数据的最高位作为对象引用计数上溢出的标记，是MSB，引用计数上溢出时，对象的retain、release操作不会改变引用计数位域的值。
+
 
 #define SIDE_TABLE_RC_SHIFT 2
 #define SIDE_TABLE_FLAG_MASK (SIDE_TABLE_RC_ONE-1)
 
 // RefcountMap disguises its pointers because we 
 // don't want the table to act as a root for `leaks`.
+///DenseMap存储了对象指针与引用计数的键值对，运行时一共维护8或64个SideTable，对应一共有8或64个DenseMap。
+///SideTable通过一个自旋锁控制对DenseMap集合的访问。所以对象如何在这8或64个SideTable之间（DenseMap之间）分布存储是提高系统并发效率的关键
 typedef objc::DenseMap<DisguisedPtr<objc_object>,size_t,true> RefcountMap;
+
+
+
 
 // Template parameters.
 enum HaveOld { DontHaveOld = false, DoHaveOld = true };
@@ -92,7 +99,28 @@ enum HaveNew { DontHaveNew = false, DoHaveNew = true };
 /// 根据SideTables的结构我们知道全局共有8或64张SideTable。一张SideTable会管理多个对象，而并非一个。
 struct SideTable {
     spinlock_t slock; /// 自旋锁:实际类型为os_unfair_lock. 防止多线程访问SideTable冲突
+    
+    /**
+       将RefcountMap简单的的理解为是一个map，key是DisguisedPtr<objc_object>，value是对象的引用计数。
+       这也是objc::DenseMap<DisguisedPtr<objc_object>,size_t,true> RefcountMap的含义
+       即模板类型分别对应：key,DisguisedPtr类型。value，size_t类型。是否清除为vlaue==0的数据，true
+     
+       value是size_t（64位系统中占用64位）来保存引用计数，
+       其中1位用来存储固定标志位，在溢出的时候使用，一位表示正在释放中，一位表示是否有弱引用，其余位表示实际的引用计数
+     
+       value的每位代表的含义
+       63                    62                 2          1                          0
+       SIDE_TABLE_RC_PINNED  ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
+     
+     
+       RefcountMap refcnts 是一个C++的对象，内部包含了一个迭代器
+         
+       其中以DisguisedPtr<objc_object> 对象指针为key，size_t 为value保存对象引用计数
+         
+       将key、value通过std::pair打包以后，放入迭代器中，所以取出值之后，.first代表key，.second代表value
+     */
     RefcountMap refcnts; /// 存放引用计数的hash表
+    
     weak_table_t weak_table; /// 存放弱引用的hash表
 
     SideTable() { /// 构造函数
@@ -179,15 +207,19 @@ void SideTable::unlockTwo<DontHaveOld, DoHaveNew>
     我们不能用C++静态初始化方法去初始化SideTables，
     因为C++初始化方法运行之前libc就会调用我们；我们同样不想用一个全局的指针去指向SideTables，
     因为需要额外的代价。但是没办法我们只能这样。
+ 
+libc 比 C++ static initializer 先调用到 SideTables，所以不能用 C++ static initializer 去调用 SideTableInit ，所以才用 SideTableBuf 来初始化。
  */
 
-// libc 比 C++ static initializer 先调用到 SideTables，所以不能用 C++ static initializer 去调用 SideTableInit ，所以才用 SideTableBuf 来初始化。
-/// 初始化SideTables: StripedMap<SideTable>类型
+
+/// SideTableBuf是一个外部不可见的静态内存区块，其类型为StripedMap<SideTable>。它是内存管理的基础，其它的功能与特性都是基于这个插槽而展开的
+/// SideTableBuf是一个静态内存区域，new StripedMap<SideTable>在其上创建了对象，巧妙的避开了初始化顺序问题
 alignas(StripedMap<SideTable>) static uint8_t
-    SideTableBuf[sizeof(StripedMap<SideTable>)]; /// 申请空间
+    SideTableBuf[sizeof(StripedMap<SideTable>)]; /// 静态内存区域
+///
 
 static void SideTableInit() {
-    new (SideTableBuf) StripedMap<SideTable>();
+    new (SideTableBuf) StripedMap<SideTable>(); /// new StripedMap<SideTable>在SideTableBuf上创建了对象
 }
 
 /**
@@ -218,6 +250,9 @@ static void SideTableInit() {
  side Tables 的本质是一张哈希表，这张哈希表当中可能有64张具体的 side Table ，然后存储不同对象的引用计数表和弱引用表
  
  */
+
+
+
 static StripedMap<SideTable>& SideTables() { /// 返回指向StripedMap<SideTable>的隐式指针
     
     return *reinterpret_cast<StripedMap<SideTable>*>(SideTableBuf); /// 将SideTableBuf转为StripedMap<SideTable>*
@@ -1538,24 +1573,38 @@ objc_object::sidetable_addExtraRC_nolock(size_t delta_rc)
 {
     assert(isa.nonpointer);
     SideTable& table = SideTables()[this];
-
+    
+    /**
+     在DenseMapBase类中重载了[]运算符,通过key可以获取到value。
+     将key、value通过std::pair打包以后，放入迭代器中，所以取出值之后，.first代表key，.second代表value
+     
+       ValueT &operator[](const KeyT &Key) {
+         return FindAndConstruct(Key).second;
+       }
+     */
+    /// 获取存放引用计数的value值 这里重载了运算符[],可以发现最终获取的是value(.second)的值
     size_t& refcntStorage = table.refcnts[this];
+  
     size_t oldRefcnt = refcntStorage;
     // isa-side bits should not be set here
     assert((oldRefcnt & SIDE_TABLE_DEALLOCATING) == 0);
     assert((oldRefcnt & SIDE_TABLE_WEAKLY_REFERENCED) == 0);
 
+    /// 63                    62 .. 计数部分 .. 2          1                          0
+    /// SIDE_TABLE_RC_PINNED  ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
+    /// value中最高位为1说明sidetable也存放不下了
     if (oldRefcnt & SIDE_TABLE_RC_PINNED) return true;
 
     uintptr_t carry;
     size_t newRefcnt = 
-        addc(oldRefcnt, delta_rc << SIDE_TABLE_RC_SHIFT, 0, &carry);
-    if (carry) {
+        addc(oldRefcnt, delta_rc << SIDE_TABLE_RC_SHIFT, 0, &carry); /// 更新引用计数
+    if (carry) { /// 溢出了
+        /// 标记为溢出
         refcntStorage =
             SIDE_TABLE_RC_PINNED | (oldRefcnt & SIDE_TABLE_FLAG_MASK);
         return true;
     }
-    else {
+    else { /// 没有溢出则将新的引用计数更新
         refcntStorage = newRefcnt;
         return false;
     }
@@ -1575,13 +1624,13 @@ objc_object::sidetable_subExtraRC_nolock(size_t delta_rc)
         // Side table retain count is zero. Can't borrow.
         return 0;
     }
-    size_t oldRefcnt = it->second;
+    size_t oldRefcnt = it->second; /// 获取存放计数的value值
 
     // isa-side bits should not be set here
     assert((oldRefcnt & SIDE_TABLE_DEALLOCATING) == 0);
     assert((oldRefcnt & SIDE_TABLE_WEAKLY_REFERENCED) == 0);
 
-    size_t newRefcnt = oldRefcnt - (delta_rc << SIDE_TABLE_RC_SHIFT);
+    size_t newRefcnt = oldRefcnt - (delta_rc << SIDE_TABLE_RC_SHIFT); /// 因为oldRefcnt的0、1位存放的是其他标志信息不参与计数
     assert(oldRefcnt > newRefcnt);  // shouldn't underflow
     it->second = newRefcnt;
     return delta_rc;
@@ -1594,8 +1643,8 @@ objc_object::sidetable_getExtraRC_nolock()
     assert(isa.nonpointer);
     SideTable& table = SideTables()[this];
     RefcountMap::iterator it = table.refcnts.find(this);
-    if (it == table.refcnts.end()) return 0;
-    else return it->second >> SIDE_TABLE_RC_SHIFT;
+    if (it == table.refcnts.end()) return 0; /// Side table retain count is zero
+    else return it->second >> SIDE_TABLE_RC_SHIFT; /// it->second的0、1位不参与计数。所以需要左移两位获取sidetable中的计数数量
 }
 
 
@@ -1611,21 +1660,30 @@ objc_object::sidetable_retain()
 #endif
     SideTable& table = SideTables()[this];
     
-    /**
-     
-     #define SIDE_TABLE_WEAKLY_REFERENCED (1UL<<0)
-     #define SIDE_TABLE_DEALLOCATING      (1UL<<1)  // MSB-ward of weak bit
-     #define SIDE_TABLE_RC_ONE            (1UL<<2)  // MSB-ward of deallocating bit
-     #define SIDE_TABLE_RC_PINNED         (1UL<<(WORD_BITS-1))
-     
-     */
-    
     table.lock();
+    /**
+     在DenseMapBase类中重载了[]运算符,通过key可以获取到value。
+     将key、value通过std::pair打包以后，放入迭代器中，所以取出值之后，.first代表key，.second代表value
+     
+       ValueT &operator[](const KeyT &Key) {
+         return FindAndConstruct(Key).second;
+       }
+     */
+    /// 获取存放引用计数的value值 这里重载了运算符[],可以发现最终获取的是value(.second)的值
     size_t& refcntStorage = table.refcnts[this];
-    if (! (refcntStorage & SIDE_TABLE_RC_PINNED)) {
-        /// #define SIDE_TABLE_RC_PINNED (1UL<<(64-1))
-        /// 0100 0000 0000 0000 0000 0000 0000 0000 0000 0000 00000 0000 0000 0000 0000 0000
-        /// 判断refcntStorage的第63位是否为0,为0说明没有溢出
+    
+    
+    /**
+         #define SIDE_TABLE_WEAKLY_REFERENCED (1UL<<0)
+         #define SIDE_TABLE_DEALLOCATING      (1UL<<1)  // MSB-ward of weak bit
+         #define SIDE_TABLE_RC_ONE            (1UL<<2)  // MSB-ward of deallocating bit
+         #define SIDE_TABLE_RC_PINNED         (1UL<<(WORD_BITS-1))
+         
+         63                    62 .. 计数部分 .. 2          1                          0
+         SIDE_TABLE_RC_PINNED  ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
+         value中最高位为1说明sidetable也存放不下了
+    */
+    if (! (refcntStorage & SIDE_TABLE_RC_PINNED)) { /// 可以存储这个数
         refcntStorage += SIDE_TABLE_RC_ONE; /// 引用计数+1,引用计数的值从第二位开始存储的,第0位和第1位有其他定义
     }
     table.unlock();
@@ -1655,13 +1713,12 @@ objc_object::sidetable_tryRetain()
 
     bool result = true;
     RefcountMap::iterator it = table.refcnts.find(this);
-    if (it == table.refcnts.end()) {
-        table.refcnts[this] = SIDE_TABLE_RC_ONE;  /// #define SIDE_TABLE_RC_ONE  (1UL<<2)
-    } else if (it->second & SIDE_TABLE_DEALLOCATING) { /// #define SIDE_TABLE_DEALLOCATING (1UL<<1)
+    if (it == table.refcnts.end()) { /// Side table中引用计数为0
+        table.refcnts[this] = SIDE_TABLE_RC_ONE;
+    } else if (it->second & SIDE_TABLE_DEALLOCATING) {
         result = false;
-    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) { /// #define SIDE_TABLE_RC_PINNED (1UL<<(64-1))
-        
-        it->second += SIDE_TABLE_RC_ONE; /// #define SIDE_TABLE_RC_ONE  (1UL<<2)
+    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) {
+        it->second += SIDE_TABLE_RC_ONE;
     }
     
     return result;
@@ -1679,7 +1736,7 @@ objc_object::sidetable_retainCount()
     RefcountMap::iterator it = table.refcnts.find(this);
     if (it != table.refcnts.end()) {
         // this is valid for SIDE_TABLE_RC_PINNED too
-        refcnt_result += it->second >> SIDE_TABLE_RC_SHIFT;
+        refcnt_result += it->second >> SIDE_TABLE_RC_SHIFT; /// side table中的retain count
     }
     table.unlock();
     return refcnt_result;
@@ -1747,6 +1804,8 @@ objc_object::sidetable_release(bool performDealloc)
 #if SUPPORT_NONPOINTER_ISA
     assert(!isa.nonpointer);
 #endif
+    /// 未优化的isa指针。即所有的引用计数都存储在sidetable中
+    
     SideTable& table = SideTables()[this];
 
     bool do_dealloc = false;

@@ -490,6 +490,8 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
         oldisa = LoadExclusive(&isa.bits); /// 将isa_t提取出来
         newisa = oldisa;
         if (slowpath(!newisa.nonpointer)) {  /// 小概率执行此处代码: 是未经优化的isa概率很小
+            
+            /// 如果是未经过优化的isa那么直接使用sidetable记录引用计数
             ClearExclusive(&isa.bits);
             
             if (!tryRetain && sideTableLocked) sidetable_unlock(); /// sideTable解锁
@@ -500,7 +502,7 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
         }
         
         
-        // 如果对象正在释放，则直接返回nil
+        // 对于标记为已析构的对象，调用retain不做关于对象引用计数的任何操作。
         // don't check newisa.fast_rr; we already called any RR overrides
         if (slowpath(tryRetain && newisa.deallocating)) { /// 小概率执行此处代码
             ClearExclusive(&isa.bits);
@@ -510,8 +512,10 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
     
         // 采用了isa优化，做extra_rc++，同时检查是否extra_rc溢出，若溢出，则extra_rc减半，并将另一半转存至sidetable
         uintptr_t carry;
+        
+        /// # define RC_ONE (1ULL<<45) isa_t结构中的第45位到63位(从0位开始)记录引用计数的值
         newisa.bits = addc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc++
-
+        
         if (slowpath(carry)) { /// 有carry值，表示extra_rc 溢出
             // newisa.extra_rc++ overflowed
             if (!handleOverflow) {
@@ -535,9 +539,12 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
             /**
              在iOS中，extra_rc占有19位，也就是最大能够表示2^19-1, 用二进制表示就是19个1。当extra_rc等于2^19时，溢出，此时的二进制位是一个1后面跟19个0， 即10000…00。将会溢出的值2^19除以2，相当于将10000…00向右移动一位。也就等于RC_HALF(1ULL<<18)，即一个1后面跟18个0
              */
-            
-            
         }
+        
+        /**
+         StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)实际调用了__sync_bool_compare_and_swap((void **)dst, (void *)oldvalue, (void *)value)
+         实现功能为：比较oldvalue和dst指针指向的值，若两者相等则将value写入dst指针的内容且返回true，否则不写入且返回false；
+         */
         /// 将oldisa 替换为 newisa，并赋值给isa.bits(更新isa_t), 如果不成功，do while再试一遍
     } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)));
     
