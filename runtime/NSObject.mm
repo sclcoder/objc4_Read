@@ -346,7 +346,7 @@ objc_storeStrong(id *location, id obj)
     }
     objc_retain(obj); /// 引用计数+1
     *location = obj;
-    objc_release(prev);
+    objc_release(prev); /// 引用计数-1
 }
 
 
@@ -1620,18 +1620,18 @@ objc_object::sidetable_subExtraRC_nolock(size_t delta_rc)
     SideTable& table = SideTables()[this];
 
     RefcountMap::iterator it = table.refcnts.find(this);
-    if (it == table.refcnts.end()  ||  it->second == 0) {
+    if (it == table.refcnts.end()  ||  it->second == 0) { /// 没有找到或者计数为0
         // Side table retain count is zero. Can't borrow.
         return 0;
     }
     size_t oldRefcnt = it->second; /// 获取存放计数的value值
 
-    // isa-side bits should not be set here
+    // isa-side bits should not be set here 不能在此设置标记
     assert((oldRefcnt & SIDE_TABLE_DEALLOCATING) == 0);
     assert((oldRefcnt & SIDE_TABLE_WEAKLY_REFERENCED) == 0);
 
     size_t newRefcnt = oldRefcnt - (delta_rc << SIDE_TABLE_RC_SHIFT); /// 因为oldRefcnt的0、1位存放的是其他标志信息不参与计数
-    assert(oldRefcnt > newRefcnt);  // shouldn't underflow
+    assert(oldRefcnt > newRefcnt);  // shouldn't underflow 不能下溢
     it->second = newRefcnt;
     return delta_rc;
 }
@@ -1811,19 +1811,39 @@ objc_object::sidetable_release(bool performDealloc)
     bool do_dealloc = false;
 
     table.lock();
+    /*****
+     该RefcountMap::iterator it = table.refcnts.find(this);方法内部执行逻辑
+     
+     1.
+     iterator find(const KeyT &Val) {
+        BucketT *TheBucket;
+        if (LookupBucketFor(Val, TheBucket)) /// 找Val对应的桶
+          return iterator(TheBucket, getBucketsEnd(), true); /// 返回迭代器，其中组装了找到的桶
+        return end(); /// 没有Val对相应的桶,返回end()的迭代器
+      }
+    
+      LookupBucketFor(Val, TheBucket)函数的说明:
+     /// LookupBucketFor - Lookup the appropriate bucket for Val, returning it in
+     /// FoundBucket.  If the bucket contains the key and a value, this returns
+     /// true, otherwise it returns a bucket with an empty marker or tombstone
+     /// or zero value and returns false.
+     */
+    
     RefcountMap::iterator it = table.refcnts.find(this);
-    if (it == table.refcnts.end()) {
+    if (it == table.refcnts.end()) { /// 没有找到对应的引用计数
         do_dealloc = true;
-        table.refcnts[this] = SIDE_TABLE_DEALLOCATING;
-    } else if (it->second < SIDE_TABLE_DEALLOCATING) {
-        // SIDE_TABLE_WEAKLY_REFERENCED may be set. Don't change it.
+        table.refcnts[this] = SIDE_TABLE_DEALLOCATING; /// 设置SIDE_TABLE_DEALLOCATING标记为1 其他位全置为0
+    } else if (it->second < SIDE_TABLE_DEALLOCATING) { /// 判断引用计数是否为0
+        /// 如果小于SIDE_TABLE_DEALLOCATING,只有00000001(有弱引用)或者00000000,两种情况下,引用计数都为0,所以需要将do_dealloc置为0
+        /// SIDE_TABLE_WEAKLY_REFERENCED may be set. Don't change it.
         do_dealloc = true;
-        it->second |= SIDE_TABLE_DEALLOCATING;
+        it->second |= SIDE_TABLE_DEALLOCATING;          /// 设置SIDE_TABLE_DEALLOCATING标记为1 SIDE_TABLE_WEAKLY_REFERENCED标记不变
     } else if (! (it->second & SIDE_TABLE_RC_PINNED)) {
-        it->second -= SIDE_TABLE_RC_ONE;
+        it->second -= SIDE_TABLE_RC_ONE;   /// 计数-1
     }
     table.unlock();
     if (do_dealloc  &&  performDealloc) {
+        /// 向对象发送dealloc消息
         ((void(*)(objc_object *, SEL))objc_msgSend)(this, SEL_dealloc);
     }
     return do_dealloc;

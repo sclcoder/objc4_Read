@@ -246,7 +246,7 @@ static ALWAYS_INLINE
 bool 
 StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
 {
-    
+//    比较oldvalue和dst指针指向的值，若两者相等则将value写入dst指针的内容且返回true，否则不写入且返回false；
     return __sync_bool_compare_and_swap((void **)dst, (void *)oldvalue, (void *)value);
 }
 
