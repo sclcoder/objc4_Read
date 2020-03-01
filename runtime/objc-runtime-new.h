@@ -1059,6 +1059,9 @@ public:
 
     bool canAllocFast() {
         return bits & FAST_ALLOC;
+        // # define FAST_ALLOC  (1UL<<2)
+        // summary bit for fast alloc path: !hasCxxCtor and
+        // !instancesRequireRawIsa and instanceSize fits into shiftedSize
     }
 #else
     size_t fastInstanceSize() {

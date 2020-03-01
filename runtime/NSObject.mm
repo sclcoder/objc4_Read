@@ -1883,7 +1883,7 @@ objc_retain(id obj)
 {
     if (!obj) return obj;
     if (obj->isTaggedPointer()) return obj; /// 是否是taggedPointer
-    return obj->retain();
+    return obj->retain(); /// 计数器+1
 }
 
 
@@ -1893,7 +1893,7 @@ objc_release(id obj)
 {
     if (!obj) return;
     if (obj->isTaggedPointer()) return;
-    return obj->release();
+    return obj->release(); /// 计数器-1、析构
 }
 
 
@@ -1903,7 +1903,7 @@ objc_autorelease(id obj)
 {
     if (!obj) return obj;
     if (obj->isTaggedPointer()) return obj;
-    return obj->autorelease();
+    return obj->autorelease(); /// 将obj添加到autoreleasePool
 }
 
 
@@ -2024,16 +2024,20 @@ callAlloc(Class cls, bool checkNil, bool allocWithZone=false)
     if (slowpath(checkNil && !cls)) return nil;
 
 #if __OBJC2__
-    if (fastpath(!cls->ISA()->hasCustomAWZ())) {
+    if (fastpath(!cls->ISA()->hasCustomAWZ())) { /// 类是否有自定义的allocWithZone
         // No alloc/allocWithZone implementation. Go straight to the allocator.
         // fixme store hasCustomAWZ in the non-meta class and 
         // add it to canAllocFast's summary
         if (fastpath(cls->canAllocFast())) {
             // No ctors, raw isa, etc. Go straight to the metal.
             bool dtor = cls->hasCxxDtor();
+            
             id obj = (id)calloc(1, cls->bits.fastInstanceSize());
+            
             if (slowpath(!obj)) return callBadAllocHandler(cls);
-            obj->initInstanceIsa(cls, dtor);
+            
+            obj->initInstanceIsa(cls, dtor); /// 初始化isa
+            
             return obj;
         }
         else {

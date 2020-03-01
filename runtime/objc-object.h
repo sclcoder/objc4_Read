@@ -152,14 +152,20 @@ inline Class
 objc_object::ISA() 
 {
     assert(!isTaggedPointer()); 
-#if SUPPORT_INDEXED_ISA
+#if SUPPORT_INDEXED_ISA    /// iWatch
     if (isa.nonpointer) {
         uintptr_t slot = isa.indexcls;
         return classForIndex((unsigned)slot);
     }
     return (Class)isa.bits;
 #else
+    /// 获取class地址
     return (Class)(isa.bits & ISA_MASK);
+    /// arm64平台 ISA_MASK的值  用于获取isa_t结构中存储的class的地址(33位有效位)
+    /// 0x 0     0    0    0    0    0     0    f    f    f    f    f    f    f    f    8   ULL
+    /// b  0000  0000 0000 0000 0000 0000  0000 1111 1111 1111 1111 1111 1111 1111 1111 1000
+    
+    
 #endif
 }
 
@@ -207,15 +213,15 @@ objc_object::initIsa(Class cls, bool nonpointer, bool hasCxxDtor)
 { 
     assert(!isTaggedPointer()); 
     
-    if (!nonpointer) {
+    if (!nonpointer) { /// 非优化的isa，直接存储cls地址
         isa.cls = cls;
     } else {
         assert(!DisableNonpointerIsa);
         assert(!cls->instancesRequireRawIsa());
 
-        isa_t newisa(0);
+        isa_t newisa(0); /// 构造函数,初始化为0
 
-#if SUPPORT_INDEXED_ISA
+#if SUPPORT_INDEXED_ISA  /// iWatch
         assert(cls->classArrayIndex() > 0);
         newisa.bits = ISA_INDEX_MAGIC_VALUE;
         // isa.magic is part of ISA_MAGIC_VALUE
@@ -223,11 +229,24 @@ objc_object::initIsa(Class cls, bool nonpointer, bool hasCxxDtor)
         newisa.has_cxx_dtor = hasCxxDtor;
         newisa.indexcls = (uintptr_t)cls->classArrayIndex();
 #else
+        
+        // ISA_MAGIC_VALUE 0x000001a000000001ULL(arm64) 初始化了 nonpointer 和 magic两个标志位
         newisa.bits = ISA_MAGIC_VALUE;
         // isa.magic is part of ISA_MAGIC_VALUE
         // isa.nonpointer is part of ISA_MAGIC_VALUE
+        
+        /// 初始化是否有C++析构函数 如果没有析构器就会快速释放内存
         newisa.has_cxx_dtor = hasCxxDtor;
+ 
+        
+        // 将类的地址存放到isa_t结构的shiftcls位置
         newisa.shiftcls = (uintptr_t)cls >> 3;
+        /**
+          将当前地址右移三位的主要原因是用于将 Class 指针中无用的后三位清除减小内存的消耗，因为类的指针要按照字节（8 bits）对齐内存，其指针后三位都是没有意义的 0。
+         
+         Using an entire pointer-sized piece of memory for the isa pointer is a bit wasteful, especially on 64-bit CPUs which don’t use all 64 bits of a pointer. ARM64 running iOS currently uses only 33 bits of a pointer, leaving 31 bits for other purposes.
+         Class pointers are also aligned, meaning that a class pointer is guaranteed to be divisible by 8, which frees up another three bits, leaving 34 bits of the isa available for other uses. Apple’s ARM64 runtime takes advantage of this for some great performance improvements.
+        */
 #endif
 
         // This write must be performed in a single store in some cases

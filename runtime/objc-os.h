@@ -120,21 +120,27 @@ void vsyslog(int, const char *, va_list) UNAVAILABLE_ATTRIBUTE;
 
 /**
  这个指令是gcc引入的，作用是"允许程序员将最有可能执行的分支告诉编译器"。
- 这个指令的写法为：__builtin_expect(EXP, N)。
+ 这个指令的写法为：__builtin_expect(EXP, N)。返回值为EXP表达式的返回值
  意思是：EXP==N的概率很大。一般的使用方法是将__builtin_expect指令封装为fastpath和slowpath宏。
 
- __builtin_expect((x),1)表示 x 的值为真的可能性更大；
- __builtin_expect((x),0)表示 x 的值为假的可能性更大。
- 也就是说，使用fastpath()，执行 if 后面的语句的机会更大，使用 slowpath()，执行 else 后面的语句的机会更大。通过这种方式，编译器在编译过程中，会将可能性更大的代码紧跟着起面的代码，从而减少指令跳转带来的性能上的下降。
-
- 作者：大明白
- 链接：https://www.jianshu.com/p/2684613a300f
+ __builtin_expect(bool(x),1)表示 x 的值为真的可能性更大；
+ __builtin_expect(bool(x),0)表示 x 的值为假的可能性更大。
+ 也就是说，使用fastpath()，执行 if 后面的语句的机会更大，使用 slowpath()，执行 else 后面的语句的机会更大。
+ 通过这种方式，编译器在编译过程中，会将可能性更大的代码紧跟着起面的代码，从而减少指令跳转带来的性能上的下降。
  
+ http://velep.com/archives/795.html
  */
 #define fastpath(x) (__builtin_expect(bool(x), 1))
 #define slowpath(x) (__builtin_expect(bool(x), 0))
 
-
+/**
+ # define ALWAYS_INLINE inline __attribute__((always_inline))
+ 
+ inline 是一种降低函数调用成本的方法，其本质是在调用声明为 inline 的函数时，会直接把函数的实现替换过去，这样减少了调用函数的成本。
+ 当然 inline 是一种以空间换时间的做法，滥用 inline 会导致应用程序的体积增大。
+ 有的时候编译器未必会真的按照你声明 inline 的方式去用函数的实现替换函数的调用。
+ 这里使用强制内联
+ */
 static ALWAYS_INLINE uintptr_t 
 addc(uintptr_t lhs, uintptr_t rhs, uintptr_t carryin, uintptr_t *carryout)
 {

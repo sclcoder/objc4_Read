@@ -101,7 +101,7 @@ union isa_t {
          // uintptr_t extraBytes : 1;  // allocated with extra bytes
          
          # if __arm64__
-         #   define ISA_MASK        0x0000000ffffffff8ULL
+         #   define ISA_MASK        0x0000000ffffffff8ULL  由于获取isa_t中shiftcls记录的类的虚虚拟内存地址
          #   define ISA_MAGIC_MASK  0x000003f000000001ULL
          #   define ISA_MAGIC_VALUE 0x000001a000000001ULL
          #   define ISA_BITFIELD
