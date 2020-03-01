@@ -438,6 +438,7 @@ objc_object::rootDealloc()
 {
     if (isTaggedPointer()) return;  // fixme necessary?
 
+    /// 优化的isa:没有弱引用 没有关联对象没有C++析构 没有sidetable辅助存储引用计数则可以快速释放对象
     if (fastpath(isa.nonpointer  &&  
                  !isa.weakly_referenced  &&  
                  !isa.has_assoc  &&  
@@ -445,9 +446,10 @@ objc_object::rootDealloc()
                  !isa.has_sidetable_rc))
     {
         assert(!sidetable_present());
-        free(this);
+        free(this);  /// 释放该对象
     } 
     else {
+        /// 内部会执行C++析构、移除关联对象、该对象所在sidetable中引用计数和弱引用相关清理工作
         object_dispose((id)this);
     }
 }

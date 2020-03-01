@@ -6657,9 +6657,10 @@ void *objc_destructInstance(id obj)
         bool assoc = obj->hasAssociatedObjects();
 
         // This order is important.
-        if (cxx) object_cxxDestruct(obj);
-        if (assoc) _object_remove_assocations(obj);
-        obj->clearDeallocating();
+        /// 函数内部会从当前对象所属的类开始遍历，一直遍历到根类位置。在遍历的过程中，会不断执行.cxx_destruct函数，对传入的对象进行析构。
+        if (cxx) object_cxxDestruct(obj); /// C++析构
+        if (assoc) _object_remove_assocations(obj); /// 移除关联对象
+        obj->clearDeallocating(); /// sidetable中清理该对象相关的引用计数和弱引用清理
     }
 
     return obj;
@@ -6675,7 +6676,7 @@ id
 object_dispose(id obj)
 {
     if (!obj) return nil;
-
+    /// 内部会执行C++析构(沿着继承链析构)、移除关联对象、该对象所在sidetable中引用计数和弱引用相关清理工作
     objc_destructInstance(obj);    
     free(obj);
 

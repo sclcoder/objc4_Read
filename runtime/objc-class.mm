@@ -437,9 +437,10 @@ static void object_cxxDestructFromClass(id obj, Class cls)
     void (*dtor)(id);
 
     // Call cls's dtor first, then superclasses's dtors.
-
+    // 从当前类开始遍历，直到遍历到根类
     for ( ; cls; cls = cls->superclass) {
-        if (!cls->hasCxxDtor()) return; 
+        if (!cls->hasCxxDtor()) return;
+        // SEL_cxx_destruct就是.cxx_destruct的selector
         dtor = (void(*)(id))
             lookupMethodInClassAndLoadCache(cls, SEL_cxx_destruct);
         if (dtor != (void(*)(id))_objc_msgForward_impcache) {
@@ -447,6 +448,7 @@ static void object_cxxDestructFromClass(id obj, Class cls)
                 _objc_inform("CXX: calling C++ destructors for class %s", 
                              cls->nameForLogging());
             }
+            // 获取到.cxx_destruct的函数指针并调用
             (*dtor)(obj);
         }
     }
@@ -462,7 +464,7 @@ void object_cxxDestruct(id obj)
 {
     if (!obj) return;
     if (obj->isTaggedPointer()) return;
-    object_cxxDestructFromClass(obj, obj->ISA());
+    object_cxxDestructFromClass(obj, obj->ISA()); /// obj->ISA() 析构函数在类中
 }
 
 
