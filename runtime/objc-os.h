@@ -32,7 +32,7 @@
 #include <TargetConditionals.h>
 #include "objc-config.h"
 
-#ifdef __LP64__
+#ifdef __LP64__ /// LP64指的是LONG/POINTER字长为64位
 #   define WORD_SHIFT 3UL
 #   define WORD_MASK 7UL
 #   define WORD_BITS 64

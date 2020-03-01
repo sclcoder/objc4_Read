@@ -6507,22 +6507,25 @@ _class_createInstanceFromZone(Class cls, size_t extraBytes, void *zone,
                               size_t *outAllocatedSize = nil)
 {
     if (!cls) return nil;
-
+    /// Realized需要深入研究!!!
     assert(cls->isRealized());
 
     // Read class's info bits all at once for performance
+    /// 是否有C++构造、析构函数
     bool hasCxxCtor = cls->hasCxxCtor();
     bool hasCxxDtor = cls->hasCxxDtor();
+    /// 能够创建优化的isa
     bool fast = cls->canAllocNonpointer();
 
-    size_t size = cls->instanceSize(extraBytes);
+    size_t size = cls->instanceSize(extraBytes); /// 实例大小,注意是字节对齐的后的大小,而且最小为16个字节
     if (outAllocatedSize) *outAllocatedSize = size;
 
     id obj;
     if (!zone  &&  fast) {
+        /// 通常调用 alloc 创建对象最终来到此处
         obj = (id)calloc(1, size);
         if (!obj) return nil;
-        obj->initInstanceIsa(cls, hasCxxDtor);
+        obj->initInstanceIsa(cls, hasCxxDtor); /// 初始化isa
     } 
     else {
         if (zone) {
@@ -6538,6 +6541,7 @@ _class_createInstanceFromZone(Class cls, size_t extraBytes, void *zone,
     }
 
     if (cxxConstruct && hasCxxCtor) {
+        /// 有C++构造函数调用其构造函数
         obj = _objc_constructOrFree(obj, cls);
     }
 

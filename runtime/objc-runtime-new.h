@@ -457,7 +457,7 @@ struct locstamped_category_list_t {
 // These flags are optimized for retain/release and alloc/dealloc
 // 64-bit stores more of them in class_t->bits to reduce pointer indirection.
 
-#if !__LP64__
+#if !__LP64__    /// LP64指的是LONG/POINTER字长为64位
 
 // class or superclass has .cxx_construct implementation
 #define RW_HAS_CXX_CTOR       (1<<18)

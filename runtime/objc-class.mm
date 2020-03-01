@@ -492,6 +492,7 @@ object_cxxConstructFromClass(id obj, Class cls)
     supercls = cls->superclass;
 
     // Call superclasses' ctors first, if any.
+    // 查看父类是否有构造函数
     if (supercls  &&  supercls->hasCxxCtor()) {
         bool ok = object_cxxConstructFromClass(obj, supercls);
         if (!ok) return nil;  // some superclass's ctor failed - give up
@@ -499,6 +500,7 @@ object_cxxConstructFromClass(id obj, Class cls)
 
     // Find this class's ctor, if any.
     ctor = (id(*)(id))lookupMethodInClassAndLoadCache(cls, SEL_cxx_construct);
+    /// _objc_msgForward_impcache??? 缓存???
     if (ctor == (id(*)(id))_objc_msgForward_impcache) return obj;  // no ctor - ok
     
     // Call this class's ctor.
@@ -506,6 +508,8 @@ object_cxxConstructFromClass(id obj, Class cls)
         _objc_inform("CXX: calling C++ constructors for class %s", 
                      cls->nameForLogging());
     }
+    
+    /// 调用构造函数
     if ((*ctor)(obj)) return obj;  // ctor called and succeeded - ok
 
     // This class's ctor was called and failed. 

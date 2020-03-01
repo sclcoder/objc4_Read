@@ -2023,26 +2023,26 @@ callAlloc(Class cls, bool checkNil, bool allocWithZone=false)
 {
     if (slowpath(checkNil && !cls)) return nil;
 
-#if __OBJC2__
-    if (fastpath(!cls->ISA()->hasCustomAWZ())) { /// 类是否有自定义的allocWithZone
+#if __OBJC2__      /// OC 2.0
+    
+    if (fastpath(!cls->ISA()->hasCustomAWZ())) { // 类是否有自定义的alloc\allocWithZone
         // No alloc/allocWithZone implementation. Go straight to the allocator.
         // fixme store hasCustomAWZ in the non-meta class and 
         // add it to canAllocFast's summary
+        
+        /// canAllocFast()返回false, 该分支进不来
         if (fastpath(cls->canAllocFast())) {
             // No ctors, raw isa, etc. Go straight to the metal.
             bool dtor = cls->hasCxxDtor();
-            
-            id obj = (id)calloc(1, cls->bits.fastInstanceSize());
-            
+            id obj = (id)calloc(1, cls->bits.fastInstanceSize()); //分配内存
             if (slowpath(!obj)) return callBadAllocHandler(cls);
-            
-            obj->initInstanceIsa(cls, dtor); /// 初始化isa
+            obj->initInstanceIsa(cls, dtor);  //初始化isa指针
             
             return obj;
         }
-        else {
+        else { /// 我们通过alloc创建的对象一般走该分支
             // Has ctor or raw isa or something. Use the slower path.
-            id obj = class_createInstance(cls, 0);
+            id obj = class_createInstance(cls, 0); /// 内部最终调用calloc分配内存
             if (slowpath(!obj)) return callBadAllocHandler(cls);
             return obj;
         }
@@ -2050,8 +2050,28 @@ callAlloc(Class cls, bool checkNil, bool allocWithZone=false)
 #endif
 
     // No shortcuts available.
+    // 如果allocWithZone使用 allocWithZone分配内存
     if (allocWithZone) return [cls allocWithZone:nil];
+    
+    // 继续调用alloc
     return [cls alloc];
+    
+    /**
+     通过calloc函数和 cls->bits.fastInstanceSize()分配的内存的。calloc函数是分配加初始化一起进行的。
+     C语言跟内存申请相关的函数主要有 alloca、calloc、malloc、realloc等.
+     1）alloca是向栈申请内存,因此无需释放.
+     2）malloc分配的内存是位于堆中的,并且没有初始化内存的内容,因此基本上malloc之后,调用函数memset来初始化这部分的内存空间.
+     3）calloc则将初始化这部分的内存,设置为0.
+     4）realloc则对malloc申请的内存进行大小的调整.
+     
+     malloc() 函数和calloc()函数的主要区别是前者不能初始化所分配的内存空间，而后者能
+     malloc调用形式为(类型*)malloc(size)：在内存的动态存储区中分配一块长度为“size”字节的连续区域，返回该区域的首地址。
+     calloc调用形式为(类型*)calloc(n，size)：在内存的动态存储区中分配n块长度为“size”字节的连续区域，返回首地址。
+     且calloc() 函数会将所分配的内存空间中的每一位都初始化为零
+     
+     realloc调用形式为(类型*)realloc(*ptr，size)：将ptr内存大小增大到size。
+     free的调用形式为free(void*ptr)：释放ptr所指向的一块内存空间。
+     */
 }
 
 
