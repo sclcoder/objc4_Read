@@ -220,9 +220,9 @@ struct entsize_list_tt {
 
 
 struct method_t {
-    SEL name;
-    const char *types;
-    MethodListIMP imp;
+    SEL name; // 方法选择器，即方法名
+    const char *types; // 方法的类型编码
+    MethodListIMP imp; // 方法的实现，即方法的函数指针、方法的IMP
 
     struct SortBySELAddress :
         public std::binary_function<const method_t&,
@@ -243,9 +243,9 @@ struct ivar_t {
     // Some code uses all 64 bits. class_addIvar() over-allocates the 
     // offset for their benefit.
 #endif
-    int32_t *offset;
-    const char *name;
-    const char *type;
+    int32_t *offset;  // 成员变量的在实例内存块中的偏移
+    const char *name; // 成员变量
+    const char *type; // 成员变量的类型编码
     // alignment is sometimes -1; use alignment() instead
     uint32_t alignment_raw;
     uint32_t size;
@@ -551,26 +551,130 @@ static_assert(FAST_IS_SWIFT_STABLE == 2, "resistance is futile");
 
 
 struct class_ro_t {
+    
+    // 32位位图，标记类的状态。需要注意class_ro_t的flags使用的位域和前面介绍的class_rw_t的flags使用的位域是完全不同的；
     uint32_t flags;
+    
+    /****
+     类注册后只读的flags位域
+     
+     // 类是元类
+     #define RO_META               (1<<0)
+     
+     // 类是根类
+     #define RO_ROOT               (1<<1)
+     
+     // 类有CXX构造/析构函数
+     #define RO_HAS_CXX_STRUCTORS  (1<<2)
+     
+     // 类有实现load方法
+     // #define RO_HAS_LOAD_METHOD    (1<<3)
+     
+     // 隐藏类
+     #define RO_HIDDEN             (1<<4)
+     
+     // class has attribute(objc_exception): OBJC_EHTYPE_$_ThisClass is non-weak
+     #define RO_EXCEPTION          (1<<5)
+     
+     // class has ro field for Swift metadata initializer callback
+     #define RO_HAS_SWIFT_INITIALIZER (1<<6)
+     
+     // 类使用ARC选项编译
+     #define RO_IS_ARC             (1<<7)
+     
+     // 类有CXX析构函数，但没有CXX构造函数
+     #define RO_HAS_CXX_DTOR_ONLY  (1<<8)
+     
+     // class is not ARC but has ARC-style weak ivar layout
+     #define RO_HAS_WEAK_WITHOUT_ARC (1<<9)
+     
+     // 类禁止使用关联对象
+     #define RO_FORBIDS_ASSOCIATED_OBJECTS (1<<10)
+
+     // class is in an unloadable bundle - must never be set by compiler
+     #define RO_FROM_BUNDLE        (1<<29)
+     
+     // class is unrealized future class - must never be set by compiler
+     #define RO_FUTURE             (1<<30)
+     
+     // class is realized - must never be set by compiler
+     #define RO_REALIZED           (1<<31)
+    
+     ****/
+    
+    
+    // 类的成员变量，在实例的内存空间中的起始偏移量；
     uint32_t instanceStart;
+    
+    
+    // 类的实例占用的内存空间大小；
     uint32_t instanceSize;
+    
+    
 #ifdef __LP64__
     uint32_t reserved;
 #endif
 
-    const uint8_t * ivarLayout;
+    // 成员变量内存布局，标记实例占用的内存空间中哪些WORD保存了成员变量数据；
+    const uint8_t * ivarLayout; /// 成员变量的内存布局
     
-    const char * name;
-    method_list_t * baseMethodList;
-    protocol_list_t * baseProtocols;
-    const ivar_list_t * ivars;
+    const char * name; // 类名
+    method_list_t * baseMethodList; // 基础方法列表，在类定义时指定的方法列表
+    protocol_list_t * baseProtocols; // 协议列表
+    const ivar_list_t * ivars; // 成员变量列表
 
-    const uint8_t * weakIvarLayout;
-    property_list_t *baseProperties;
+    const uint8_t * weakIvarLayout; // weak成员变量布局
+    property_list_t *baseProperties; // 基础属性列表，在类定义时指定的属性列表
 
     method_list_t *baseMethods() const {
         return baseMethodList;
     }
+    
+    /***
+     类构建成员变量列表的过程，包含确定成员变量布局（ivar layout） 的过程。成员变量布局就是定义对象占用内存空间中哪块区域保存哪个成员变量，具体为确定类的instanceSize、内存对齐字节数、成员变量的offset。类的继承链上所有类的成员变量布局，共同构成了对象内存布局（object layout）。成员变量布局和对象内存布局的关系可以用一个公式表示：类的对象内存布局 = 父类的对象内存布局 + 类的成员变量布局
+
+     1.成员变量的偏移量offset必须大于等于父类的instanceSize；
+     
+     2.成员变量的布局和结构体的对齐遵循同样的准则，类的对齐字节数必须大于等于父类的对齐字节数。
+     例如，占用4字节的int类型成员变量的起始内存地址必须是4的倍数，占用8字节的id类型成员变量的起始内存地址必须是8的倍数；
+     
+     3.instanceSize的计算公式是类的instanceSize = 父类的instanceSize + 类的成员变量在实例中占用的内存空间 + 对齐填补字节，instanceSize必须是类的对齐字节数的整数倍；
+
+     NSObject类的定义中，包含一个Class类型的isa成员，因此实际上isa指针的8个字节内存空间也属于对象内存布局的范畴。
+     
+     
+     
+     @interface TestObjectLayout : NSObject{
+         bool bo;
+         int num;
+         char ch;
+         id obj;
+     }
+     @end
+
+     @implementation TestObjectLayout
+
+     @end
+
+     其成员变量布局的计算过程如下：
+
+     1.instanceSize初始化为父类的instanceSize的值，并按父类的对齐字节数对齐。
+     父类NSObject仅包含isa一个成员变量，isa占用8个字节offset为0，因此父类instanceSize为8，按8字节对齐；
+     
+     2.instanceSize初始化，按照对齐法则依次添加成员变量，并更新instanceSize。
+     bo按字节对齐（注意bool类型占用1字节空间并不是1位），偏移量为8，instanceSize更新为16；
+     
+     3.num按4字节对齐，偏移量为12，instanceSize仍为16；
+     
+     4.ch按字节对齐，偏移量为16，instanceSize更新为24；
+     
+     5.obj按8字节对齐，偏移量为24，instanceSize更新为32。最终确定instanceSize为32字节，按8字节对齐。
+
+     类的构建过程之所以要计算类的成员变量布局，是因为构建一个对象时需要确定需要为对象分配的内存空间大小，且构建对象仅返回对象的内存首地址，而通过成员变量的offset结合ivar_type，则可以轻而易取地通过对象地址定位到保存成员变量的内存空间。
+     
+     https://juejin.im/post/5d8c7aab51882505d334d7a5
+     
+     */
 };
 
 
@@ -825,35 +929,92 @@ class protocol_array_t :
 
 struct class_rw_t {
     // Be warned that Symbolication knows the layout of this structure.
-    uint32_t flags;
-    uint32_t version;
+    uint32_t flags; // 32位位图，标记类的状态
+    /**
+     类注册后可读写的flags位域
+     class_rw_t的flags成员中比较重要的一些位域定义列举如下，均以RW_为前缀，这些位域在类注册后仍可读写。
+     
+     // 类是已经注册的类
+     #define RW_REALIZED           (1<<31)
+     
+     // 类是尚未解析的future class
+     #define RW_FUTURE             (1<<30)
+     
+     // 类是已经初始化的类
+     #define RW_INITIALIZED        (1<<29)
+     
+     // 类是正在初始化的类
+     #define RW_INITIALIZING       (1<<28)
+     
+     // class_rw_t->ro是class_ro_t的堆拷贝
+     // 此时类的class_rw_t->ro是可写入的，拷贝之前ro的内存区域锁死不可写入
+     #define RW_COPIED_RO          (1<<27)
+     
+     // 类是正在构建而仍未注册的类
+     #define RW_CONSTRUCTING       (1<<26)
+     
+     // 类是已经构建完成并注册的类
+     #define RW_CONSTRUCTED        (1<<25)
+     
+     // 类是load方法已经调用过的类
+     #define RW_LOADED             (1<<23)
+     
+     #if !SUPPORT_NONPOINTER_ISA
+     
+     // 类是可能实例可能存在关联对象的类
+     // 默认编译选项下，无需定义该位，因为都可能有关联对象
+     #define RW_INSTANCES_HAVE_ASSOCIATED_OBJECTS (1<<22)
+     
+     #endif
+     
+     // 类是具有实例相关的GC layout的类
+     #define RW_HAS_INSTANCE_SPECIFIC_LAYOUT (1 << 21)
+     
+     // 类是禁止使用关联对象的类
+     #define RW_FORBIDS_ASSOCIATED_OBJECTS       (1<<20)
+     
+     // 类是正在注册，但是未注册完成的类
+     #define RW_REALIZING          (1<<19)
+     
+     // 链接：https://juejin.im/post/5da17d08e51d45783a772a13
+     */
+    
+    uint32_t version; // 标记类的类型，0表示类为非元类，7表示类为元类；
 
-    const class_ro_t *ro;
+    
+    /**
+      类完成注册后，类的实例占用的内存大小、成员变量列表、成员变量内存布局等重要信息需要固定下来，
+      这些在类注册后需要标记为只读的数据保存在class_ro_t结构体中，class_rw_t结构体的ro成员为指向该结构体的指针。
+    ***/
+    const class_ro_t *ro; // 保存类的只读数据，注册类后ro中的数据标记为只读，成员变量列表保存在ro中
 
-    method_array_t methods;
-    property_array_t properties;
-    protocol_array_t protocols;
+    method_array_t methods; // 方法列表，其类型method_array_t为二维数组容器
+    property_array_t properties; // 属性列表，其类型property_array_t为二维数组容器
+    protocol_array_t protocols;  // 协议列表，其类型protocol_array_t为二维数组容器
 
-    Class firstSubclass;
-    Class nextSiblingClass;
+    Class firstSubclass;  // 类的首个子类，与nextSiblingClass记录所有类的继承链组织成的继承树
+    Class nextSiblingClass; // 类的下一个兄弟类
 
-    char *demangledName;
+    char *demangledName; // 类名，来自Swift的类会包含一些特别前缀，demangledName是处理后的类名
 
-#if SUPPORT_INDEXED_ISA
-    uint32_t index;
+#if SUPPORT_INDEXED_ISA // iWatch中定义
+    uint32_t index; // 标记类的对象的isa是否为index类型
 #endif
 
+    // 设置set指定的位
     void setFlags(uint32_t set) 
     {
         OSAtomicOr32Barrier(set, &flags);
     }
 
+    // 清空clear指定的位
     void clearFlags(uint32_t clear) 
     {
         OSAtomicXor32Barrier(clear, &flags);
     }
 
     // set and clear must not overlap
+    // 设置set指定的位，清空clear指定的位
     void changeFlags(uint32_t set, uint32_t clear) 
     {
         assert((set & clear) == 0);
@@ -924,6 +1085,7 @@ public:
     }
     void setData(class_rw_t *newData)
     {
+        // 仅在类注册、构建阶段才允许调用setData
         assert(!data()  ||  (newData->flags & (RW_REALIZING | RW_FUTURE)));
         // Set during realization or construction only. No locking needed.
         // Use a store-release fence because there may be concurrent
@@ -1009,6 +1171,8 @@ public:
     }
 #endif
 
+// 是否支持非指针类型isa
+    
 #if FAST_REQUIRES_RAW_ISA
     bool instancesRequireRawIsa() {
         return getBit(FAST_REQUIRES_RAW_ISA);
@@ -1017,6 +1181,7 @@ public:
         setBits(FAST_REQUIRES_RAW_ISA);
     }
 #elif SUPPORT_NONPOINTER_ISA
+    // 主流机型一般走到这个编译分支
     bool instancesRequireRawIsa() {
         return data()->flags & RW_REQUIRES_RAW_ISA;
     }
@@ -1112,14 +1277,33 @@ public:
 
 
 struct objc_class : objc_object {
-    // Class ISA;
-    Class superclass;
+    // Class ISA;     // 元类
+    Class superclass; // 父类
+    
+    // 类使用哈希表数据结构缓存最近调用方法，以提高方法查找效率
     cache_t cache;             // formerly cache pointer and vtable
+    
+    /// class_data_bits_t结构体类型，该结构体主要用于记录，保存类的数据的class_rw_t结构体的内存地址。
+    /// 通过data()方法访问bits的有效位域指向的内存空间，返回class_rw_t结构体；setData(class_rw_t *newData)用于设置bits的值；
     class_data_bits_t bits;    // class_rw_t * plus custom rr/alloc flags
 
+    /**
+     类的数据主要保存在class_data_bits_t结构体中，其成员仅有一个bits指针。
+     objc_class的data()方法用于获取bits成员的 4~47 位域（FAST_DATA_MASK）中保存的class_rw_t结构体地址。
+     类的数据保存在class_rw_t结构体中，剩余的部分保存在ro指针指向的class_ro_t结构体中。
+     class_rw_t、class_ro_t结构体名中，rw是 read write 的缩写，ro是 read only 的缩写，可见class_ro_t的保存类的只读信息，这些信息在类完成注册后不可改变。
+     以类的成员变量列表为例（成员变量列表保存在class_ro_t结构体中）。
+     若应用类注册到内存后，使用类构建了若干实例，此时若添加成员变量必然需要对内存中的这些类重新分配内存，这个操作的花销是相当大的。
+     若考虑再极端一些，为根类NSObject添加成员变量，则内存中基本所有 Objective-C 对象都需要重新分配内存，如此庞大的计算量在运行时是不可接受的
+     */
+    
+    
+    // 获取类的数据
     class_rw_t *data() { 
         return bits.data();
     }
+    
+    // 设置类的数据
     void setData(class_rw_t *newData) {
         bits.setData(newData);
     }

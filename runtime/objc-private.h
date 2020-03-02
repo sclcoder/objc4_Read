@@ -127,6 +127,13 @@ union isa_t {
 struct objc_object {
 private:
     isa_t isa;
+    
+    /**
+     objc_object结构体只有一个指针类型的isa成员，也就是说一个objc_object仅占用了8个字节内存，但并不说明对象仅占8个字节内存空间。
+     当调用类的alloc或allocWithZone方法构建对象时，runtime会分配类的instanceSize大小的连续内存空间用于保存对象。
+     在该内存块的前8个字节写入类的地址，其余空间用于保存其他成员变量。
+     最后构建方法返回的id实际上是指向该内存块的首地址的指针。
+     */
 
 public:
 

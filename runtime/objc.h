@@ -34,19 +34,19 @@
 #include <stdbool.h>
 
 #if !OBJC_TYPES_DEFINED
-/// An opaque type that represents an Objective-C class.
+/// An opaque type that represents an Objective-C class.  类的定义
 typedef struct objc_class *Class;
 
-/// Represents an instance of a class.
+/// Represents an instance of a class. 对象的定义
 struct objc_object {
-    Class _Nonnull isa  OBJC_ISA_AVAILABILITY;
+    Class _Nonnull isa  OBJC_ISA_AVAILABILITY; // 对象的类
 };
 
-/// A pointer to an instance of a class.
+/// A pointer to an instance of a class.对象的引用的定义
 typedef struct objc_object *id;
 #endif
 
-/// An opaque type that represents a method selector.
+/// An opaque type that represents a method selector. 方法选择器定义
 typedef struct objc_selector *SEL;
 
 /// A pointer to the function of a method implementation. 
