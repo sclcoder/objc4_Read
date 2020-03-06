@@ -341,11 +341,14 @@ header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hdr)
     return &hinfoRW->headers[index];
 }
 
-
+/// 预优化初始化
 void preopt_init(void)
 {
     // Get the memory region occupied by the shared cache.
     size_t length;
+    /// Returns the start address of the dyld cache in the process and sets length to the size of the cache
+    /// Returns NULL if the process is not using a dyld shared cache
+    /// 获取动态库缓存地址和范围
     const void *start = _dyld_get_shared_cache_range(&length);
     if (start) {
         shared_cache_start = (uintptr_t)start;
@@ -357,7 +360,7 @@ void preopt_init(void)
     // `opt` not set at compile time in order to detect too-early usage
     const char *failure = nil;
     opt = &_objc_opt_data;
-
+    /// 关闭预优化
     if (DisablePreopt) {
         // OBJC_DISABLE_PREOPTIMIZATION is set
         // If opt->version != VERSION then you continue at your own risk.

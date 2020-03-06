@@ -495,8 +495,14 @@ static void addClassTableEntry(Class cls, bool addMeta = true) {
     // This class is allowed to be a known class via the shared cache or via
     // data segments, but it is not allowed to be in the dynamic table already.
     assert(!NXHashMember(allocatedClasses, cls));
-
-    if (!isKnownClass(cls))
+    
+  /**
+    * Return true if the class is known to the runtime (located within the
+    * shared cache, within the data segment of a loaded image, or has been
+    * allocated with obj_allocateClassPair).
+   */
+    
+    if (!isKnownClass(cls)) /// runtime是否已经知道该cls
         NXHashInsert(allocatedClasses, cls);
     if (addMeta)
         addClassTableEntry(cls->ISA(), false);
@@ -838,17 +844,18 @@ static void methodizeClass(Class cls)
     }
 
     // Install methods and properties that the class implements itself.
+    // 将ro中的基本方法列表添加到rw的方法列表中
     method_list_t *list = ro->baseMethods();
     if (list) {
         prepareMethodLists(cls, &list, 1, YES, isBundleClass(cls));
         rw->methods.attachLists(&list, 1);
     }
-
+    // 将ro中的属性列表添加到rw的属性列表中
     property_list_t *proplist = ro->baseProperties;
     if (proplist) {
         rw->properties.attachLists(&proplist, 1);
     }
-
+    // 将ro中的协议列表添加到rw的协议列表中
     protocol_list_t *protolist = ro->baseProtocols;
     if (protolist) {
         rw->protocols.attachLists(&protolist, 1);
@@ -858,10 +865,12 @@ static void methodizeClass(Class cls)
     // them already. These apply before category replacements.
     if (cls->isRootMetaclass()) {
         // root metaclass
+        // 根元类特殊处理
         addMethod(cls, SEL_initialize, (IMP)&objc_noop_imp, "", NO);
     }
 
     // Attach categories.
+    // 将分类中的方法列表添加到rw的方法列表中
     category_list *cats = unattachedCategoriesForClass(cls, true /*realizing*/);
     attachCategories(cls, cats, false /*don't flush caches*/);
 
@@ -1098,6 +1107,7 @@ static char *copySwiftV1MangledName(const char *string, bool isProtocol = false)
 
 // This is a misnomer: gdb_objc_realized_classes is actually a list of 
 // named classes not in the dyld shared cache, whether realized or not.
+// 这是一个误称：gdb_objc_realized_classes实际上是不在dyld共享缓存中的named classes，无论是否实现。
 NXMapTable *gdb_objc_realized_classes;  // exported for debuggers in objc-gdb.h
 
 static Class getClass_impl(const char *name)
@@ -1244,6 +1254,14 @@ static void addFutureNamedClass(const char *name, Class cls)
     rw->ro = ro;
     cls->setData(rw);
     cls->data()->flags = RO_FUTURE;
+    
+    /**
+     Future class 类的有效数据实际上仅有：类名和rw。
+     rw中的数据作用也非常少，仅使用flags的RO_FUTURE（实际上就是RW_FUTURE）标记类是 future class；
+     
+     Future class 的作用是为指定类名的类，提前分配好内存空间，调用readClass(...)函数读取类时，才正式写入类的数据。 Future class 是用于支持类的懒加载机制；
+     
+     */
 
     old = NXMapKeyCopyingInsert(futureNamedClasses(), name, cls);
     assert(!old);
@@ -1281,8 +1299,11 @@ static Class popFutureNamedClass(const char *name)
 * Returns the oldClass => nil map for ignored weak-linked classes.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+
+// 获取remappedClasses，保存已重映射的所有类的全局哈希表
 static NXMapTable *remappedClasses(bool create)
 {
+    // 静态的全局哈希表，没有找到remove接口，只会无限扩张
     static NXMapTable *remapped_class_map = nil;
 
     runtimeLock.assertLocked();
@@ -1324,6 +1345,9 @@ static bool noClassesRemapped(void)
 * OR newcls is nil, replacing ignored weak-linked class oldcls.
 * Locking: runtimeLock must be write-locked by the caller
 **********************************************************************/
+
+// 将oldcls重映射得到的newcls，以oldcls为关键字插入到remappedClasses哈希表中
+// 注意：从代码透露出来的信息是，remappedClasses中只保存 future class 重映射的类
 static void addRemappedClass(Class oldcls, Class newcls)
 {
     runtimeLock.assertLocked();
@@ -1346,6 +1370,9 @@ static void addRemappedClass(Class oldcls, Class newcls)
 * Returns nil if cls is ignored because of weak linking.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+
+// 获取cls的重映射类
+// 注意：当remappedClasses为空或哈希表中不存在`cls`关键字，是返回`cls`本身，否则返回`cls`重映射后的类
 static Class remapClass(Class cls)
 {
     runtimeLock.assertLocked();
@@ -1379,6 +1406,7 @@ Class _class_remap(Class cls)
 * or is an ignored weak-linked class.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 对Class的指针的重映射，返回时传入的clsref将 指向*clsref重映射后的类
 static void remapClassRef(Class *clsref)
 {
     runtimeLock.assertLocked();
@@ -1857,6 +1885,29 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
 **********************************************************************/
 static Class realizeClass(Class cls)
 {
+    
+    /**
+     调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类。具体包括：
+
+     .配置class_rw_t的RW_REALIZED、RW_REALIZING位；
+     
+     .根据class_ro_t的RO_META位的值，配置class_rw_t的version；
+     
+     .因为静态载入的父类、元类有可能被重映射，因此要保证类的父类、元类完成class realizing；
+     
+     .配置class_rw_t的superclass；
+     
+     .初始化objc_class的isa指针；
+     
+     .配置ivarLayout、instanceSize、instanceStart。该步骤非常重要，新版本 runtime 支持 non-fragile instance variables，类的instanceStart、instanceSize会根据父类的instanceSize动态调整，且需要按 WORD 对齐；
+     
+     .配置class_rw_t的RO_HAS_CXX_STRUCTORS、RO_HAS_CXX_DTOR_ONLY、RW_FORBIDS_ASSOCIATED_OBJECTS；
+     添加子类/根类；
+     
+     .将class_ro_t中的基本方法列表、属性列表、协议列表，类的分类（category）中的方法列表等信息添加到class_rw_t中.
+     
+     */
+    
     runtimeLock.assertLocked();
 
     const class_ro_t *ro;
@@ -1866,19 +1917,22 @@ static Class realizeClass(Class cls)
     bool isMeta;
 
     if (!cls) return nil;
-    if (cls->isRealized()) return cls;
-    assert(cls == remapClass(cls));
+    if (cls->isRealized()) return cls; /// 已经认识了直接返回
+    assert(cls == remapClass(cls));  // 传入的类必须不存在于remappedClasses全局哈希表中
 
     // fixme verify class is not in an un-dlopened part of the shared cache?
 
-    ro = (const class_ro_t *)cls->data();
+    ro = (const class_ro_t *)cls->data(); /// 此时的cls->data()获取的数据是class_ro_t* 类型
+    
     if (ro->flags & RO_FUTURE) {
         // This was a future class. rw data is already allocated.
+        // 若为future class，则cls的rw指向class_rw_t结构体，ro指向class_ro_t结构体，维持原状
         rw = cls->data();
         ro = cls->data()->ro;
         cls->changeInfo(RW_REALIZED|RW_REALIZING, RW_FUTURE);
     } else {
         // Normal class. Allocate writeable class data.
+        // 普通类，则需要为rw分配内存，并将ro指针指向 传入的cls->data()所指向的内存空间
         rw = (class_rw_t *)calloc(sizeof(class_rw_t), 1);
         rw->ro = ro;
         rw->flags = RW_REALIZED|RW_REALIZING;
@@ -1903,9 +1957,13 @@ static Class realizeClass(Class cls)
     // Realize superclass and metaclass, if they aren't already.
     // This needs to be done after RW_REALIZED is set above, for root classes.
     // This needs to be done after class index is chosen, for root metaclasses.
+    
+    // 父类realizing
     supercls = realizeClass(remapClass(cls->superclass));
+    // 元类realizing
     metacls = realizeClass(remapClass(cls->ISA()));
 
+    // 配置RW_REQUIRES_RAW_ISA位。可忽略。
 #if SUPPORT_NONPOINTER_ISA
     // Disable non-pointer isa for some classes and/or platforms.
     // Set instancesRequireRawIsa.
@@ -1935,6 +1993,7 @@ static Class realizeClass(Class cls)
         rawIsaIsInherited = true;
     }
     
+    // 配置RW_REQUIRES_RAW_ISA位
     if (instancesRequireRawIsa) {
         cls->setInstancesRequireRawIsa(rawIsaIsInherited);
     }
@@ -1942,17 +2001,22 @@ static Class realizeClass(Class cls)
 #endif
 
     // Update superclass and metaclass in case of remapping
+    // 由于存在class remapping的可能性，因此需要更新父类及元类
     cls->superclass = supercls;
     cls->initClassIsa(metacls);
 
     // Reconcile instance variable offsets / layout.
     // This may reallocate class_ro_t, updating our ro variable.
+
+    // 调整ivarLayout
     if (supercls  &&  !isMeta) reconcileInstanceVariables(cls, supercls, ro);
 
     // Set fastInstanceSize if it wasn't set already.
+    // 调整instanceSize
     cls->setInstanceSize(ro->instanceSize);
 
     // Copy some flags from ro to rw
+    // 忽略
     if (ro->flags & RO_HAS_CXX_STRUCTORS) {
         cls->setHasCxxDtor();
         if (! (ro->flags & RO_HAS_CXX_DTOR_ONLY)) {
@@ -1961,13 +2025,17 @@ static Class realizeClass(Class cls)
     }
 
     // Connect this class to its superclass's subclass lists
+    // 添加子类/根类
     if (supercls) {
         addSubclass(supercls, cls);
     } else {
         addRootClass(cls);
     }
 
+
     // Attach categories
+    // rw中需要保存ro中的一些数据，例如ro中的基础方法列表、属性列表、协议列表
+    // rw还需要载入分类的方法列表
     methodizeClass(cls);
 
     return cls;
@@ -2149,7 +2217,7 @@ void _objc_flush_caches(Class cls)
 
 /***********************************************************************
 * map_images
-* Process the given images which are being mapped in by dyld.
+* Process the given images which are being mapped in by dyld.    处理被dyld映射的images
 * Calls ABI-agnostic code after taking ABI-specific locks.
 *
 * Locking: write-locks runtimeLock
@@ -2159,6 +2227,7 @@ map_images(unsigned count, const char * const paths[],
            const struct mach_header * const mhdrs[])
 {
     mutex_locker_t lock(runtimeLock);
+    /// count:映射的image数量 paths:images的路径数组 mhdrs: images(mach-o文件)的header信息数组
     return map_images_nolock(count, paths, mhdrs);
 }
 
@@ -2266,11 +2335,32 @@ bool mustReadClasses(header_info *hi)
 * mustReadClasses(). Do not change this function without updating that one.
 *
 * Locking: runtimeLock acquired by map_images or objc_readClassPair
+ 
+ ????????????????????????/
+若futureNamedClasses哈希表中存在cls->mangledName()类名的 future class，则将cls重映射（remapping）到新的类newCls，
+ 然后将newCls标记为 remapped class，以cls为关键字添加到全局记录的remappedClasses()哈希表中；
+ 
+将cls标记为 named class，以cls->mangledName()类名为关键字添加到全局记录的gdb_objc_realized_classes哈希表中，表示 runtime 开始可以通过类名查找类（注意元类不需要添加）；
+ 
+将cls及其元类标记为allocatedclass，并将两者均添加到全局记录的allocatedClasses哈希表中（无需关键字），表示已为类分配固定内存空间；
+????????????????????????/
+ 
+注意：
+ 传入readClass(...)的cls参数是Class类型，而函数返回结果也是Class，为什么读取类信息是“从类中读取类信息”这样怪异的过程呢？
+   其实是因为cls参数来源于 runtime 未开源的 从镜像（image）中读取类的过程，该过程输出的objc_class存在特殊之处：
+   要么输出 future class，
+   要么输出普通类但是其bits指向的是class_ro_t结构体而非class_rw_t，
+   之所以如此是因为从镜像读取的是编译时决议的静态数据，本来就应该保存在class_ro_t结构体中。
+
 **********************************************************************/
+
+/// 主要将读取的cls添加到全局表中
 Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 {
-    const char *mangledName = cls->mangledName();
+    const char *mangledName = cls->mangledName(); // mangledName:整齐的名字
     
+    //类的继承链上，存在既不是根类（RO_ROOT位为0）又没有超类的类，则为missingWeakSuperclass
+    //注意：这是唯一的向remappedClasses中添加nil值的入口
     if (missingWeakSuperclass(cls)) {
         // No superclass (probably weak-linked). 
         // Disavow any knowledge of this subclass.
@@ -2301,10 +2391,18 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 #endif
 
     Class replacing = nil;
+    
+    ////       future class的重映射代码        ////
+    
+    // 1. 若该类名已被标记为future class（懒加载的类），则弹出该类名对应的future class 赋值给newCls
     if (Class newCls = popFutureNamedClass(mangledName)) {
         // This name was previously allocated as a future class.
         // Copy objc_class to future class's struct.
-        // Preserve future's rw data block.
+        // Preserve（保留） future's rw data block.
+        
+        // 已经全局记录该类名的 future class
+        // 构建newCls并将cls的内容拷贝到其中，保存future class的rw中的数据
+        // 以cls为关键字将构建的newCls添加到全局记录的remappedClasses哈希表中
         
         if (newCls->isAnySwift()) {
             _objc_fatal("Can't complete future class request for '%s' "
@@ -2312,31 +2410,57 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
                         cls->nameForLogging());
         }
         
+        // 2. rw记录future class的rw
         class_rw_t *rw = newCls->data();
+        // 3. future class的ro记为old_ro，后面释放其占用的内存空间并丢弃
         const class_ro_t *old_ro = rw->ro;
+        // 4. 将cls中的数据拷贝到newCls，主要是要沿用cls的isa、superclass和cache数据
         memcpy(newCls, cls, sizeof(objc_class));
+        // 5. rw记录cls的ro
         rw->ro = (class_ro_t *)newCls->data();
+        // 6. 沿用future class的rw、cls的ro
         newCls->setData(rw);
+        // 7. 释放future class的ro占用的空间 在cls映射到newCls过程中，完全丢弃了 future class 的ro数据
         freeIfMutable((char *)old_ro->name);
         free((void *)old_ro);
         
+        // 8. 将newCls以cls为关键字添加到remappedClasses哈希表中
         addRemappedClass(cls, newCls);
         
         replacing = cls;
         cls = newCls;
+        
+        /// 上述只是对 future class 的重映射过程
+        
+        /****
+         Future class 类的有效数据实际上仅有：类名和rw。
+         rw中的数据作用也非常少，仅使用flags的RO_FUTURE（实际上就是RW_FUTURE）标记类是 future class；
+         
+         Future class 的作用是为指定类名的类，提前分配好内存空间，调用readClass(...)函数读取类时，才正式写入类的数据。 Future class 是用于支持类的懒加载机制；
+         
+         具体请看static void addFutureNamedClass(const char *name, Class cls)
+         **/
     }
     
     if (headerIsPreoptimized  &&  !replacing) {
         // class list built in shared cache
         // fixme strict assert doesn't work because of duplicates
         // assert(cls == getClass(name));
+        
+        // 已存在该类名的named class
         assert(getClass(mangledName));
     } else {
+        // Adds name => cls to the named non-meta class map ---- gdb_objc_realized_classes(不在共享缓存中的named class)
+        // 将类添加到 named classes
         addNamedClass(cls, mangledName, replacing);
+        
+        // allocated classes
+        // 将类添加到 allocated classes
         addClassTableEntry(cls);
     }
 
     // for future reference: shared cache never contains MH_BUNDLEs
+    // 设置RO_FROM_BUNDLE位
     if (headerIsBundle) {
         cls->data()->flags |= RO_FROM_BUNDLE;
         cls->ISA()->data()->flags |= RO_FROM_BUNDLE;
@@ -2439,12 +2563,15 @@ readProtocol(protocol_t *newproto, Class protocol_class,
 /***********************************************************************
 * _read_images
 * Perform initial processing of the headers in the linked 
-* list beginning with headerList. 
-*
+* list beginning with headerList.
 * Called by: map_images_nolock
-*
 * Locking: runtimeLock acquired by map_images
+ 
+ _read_images根据前面生成的header_info结构体的数组，加载镜像中定义的 Objective-C 元素，如类、分类、协议。下面的代码非常长，将其分为几个部分详细分析。从代码注释中可以清晰地知道其处理流程。
+
 **********************************************************************/
+
+// 加载镜像中的 Objective-C 元素
 void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int unoptimizedTotalClasses)
 {
     header_info *hi;
@@ -2462,14 +2589,15 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     hIndex = 0;         \
     hIndex < hCount && (hi = hList[hIndex]); \
     hIndex++
-
+    // 1. 首次运行的初始化配置，注意该逻辑块内的代码全局只执行一次
     if (!doneOnce) {
         doneOnce = YES;
 
+    // 1.1 配置 isa 类型支持相关，忽略
 #if SUPPORT_NONPOINTER_ISA
         // Disable non-pointer isa under some conditions.
 
-# if SUPPORT_INDEXED_ISA
+# if SUPPORT_INDEXED_ISA  // iWatch
         // Disable nonpointer isa if any image contains old Swift code
         for (EACH_HEADER) {
             if (hi->info()->containsSwift()  &&
@@ -2486,7 +2614,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
         }
 # endif
 
-# if TARGET_OS_OSX
+# if TARGET_OS_OSX   /// 关闭优化isa
         // Disable non-pointer isa if the app is too old
         // (linked before OS X 10.11)
         if (dyld_get_program_sdk_version() < DYLD_MACOSX_VERSION_10_11) {
@@ -2515,25 +2643,30 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 # endif
 
 #endif
-
+        // 1.2 配置 tagged pointer 支持相关，忽略
         if (DisableTaggedPointers) {
             disableTaggedPointers();
         }
         
         initializeTaggedPointerObfuscator();
 
-        if (PrintConnecting) {
+        if (PrintConnecting) { /// 对应的环境变量 OBJC_PRINT_CLASS_SETUP
             _objc_inform("CLASS: found %d classes during launch", totalClasses);
         }
 
+       
         // namedClasses
         // Preoptimized classes don't go in this table.
         // 4/3 is NXMapTable's load factor
-        int namedClassesSize = 
+        
+        // 1.3 初始化gdb_objc_realized_classes
+        int namedClassesSize =
             (isPreoptimized() ? unoptimizedTotalClasses : totalClasses) * 4 / 3;
+        /// gdb_objc_realized_classes实际上是不在dyld共享缓存中的named classes
         gdb_objc_realized_classes =
             NXCreateMapTable(NXStrValueMapPrototype, namedClassesSize);
         
+        // 1.4 初始化allocatedClasses哈希表用于保存已完成内存分配的类及元类，完成内存分配是指完成类的class_rw_t内存分配
         allocatedClasses = NXCreateHashTable(NXPtrPrototype, 0, nil);
         
         ts.log("IMAGE TIMES: first time tasks");
@@ -2541,12 +2674,24 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
 
     // Discover classes. Fix up unresolved future classes. Mark bundle classes.
-
+    
+    // 2. 发现类
     for (EACH_HEADER) {
-        classref_t *classlist = _getObjc2ClassList(hi, &count);
+        
+        /*********
+            _read_images(...)中以下代码用于发现类。实际上是构建 future class 的实体类（remapped future class/resolved future class）的过程，可以简称为 future class 解析（future class resolving）。具体步骤是：
+
+                首先，通过_getObjc2ClassList(...)读取header_info指向的镜像中的__objc_classlist数据 section，以提取镜像中定义的所有类；
+                然后，调用readClass(...)读取镜像中对应 future class（保存在全局的future_named_class_map哈希表中）的类的元数据，构建 future class 的实体类（remapped future class），并将实体类添加到remappedClasses全局哈希表中；
+                最后，若readClass(...)返回的类不等于传入的类，则说明该类已被重映射，将返回的类保存到已解析 future class 局部变量resolvedFutureClasses中。
+        ***********/
+    
+        /// classref_t is unremapped class_t*
+        classref_t *classlist = _getObjc2ClassList(hi, &count); /// 提取镜像中定义的所有类
         
         if (! mustReadClasses(hi)) {
             // Image is sufficiently optimized that we need not call readClass()
+            // 镜像已充分优化，因此我们无需调用readClass（）
             continue;
         }
 
@@ -2554,16 +2699,28 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
         bool headerIsPreoptimized = hi->isPreoptimized();
 
         for (i = 0; i < count; i++) {
+            
+            // 直接从header_info读出来的类
             Class cls = (Class)classlist[i];
+            
+            /**
+             调用readClass(...)读取镜像中对应 future class（保存在全局的future_named_class_map哈希表中）的类的元数据，构建 future class 的实体类（remapped future class），并将实体类添加到remappedClasses全局哈希表中
+             
+             调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类
+             */
             Class newCls = readClass(cls, headerIsBundle, headerIsPreoptimized);
-
+            
+            // 若readClass返回的类非空且不等于直接从header_info读出来的类则该类为future class
             if (newCls != cls  &&  newCls) {
                 // Class was moved but not deleted. Currently this occurs 
                 // only when the new class resolved a future class.
                 // Non-lazily realize the class below.
+                
+                // 若readClass(...)返回的类不等于传入的类，则说明该future class已被重映射，将返回的类保存到已解析 future class 局部变量resolvedFutureClasses中。
                 resolvedFutureClasses = (Class *)
                     realloc(resolvedFutureClasses, 
                             (resolvedFutureClassCount+1) * sizeof(Class));
+                
                 resolvedFutureClasses[resolvedFutureClassCount++] = newCls;
             }
         }
@@ -2575,15 +2732,31 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     // Class list and nonlazy class list remain unremapped.
     // Class refs and super refs are remapped for message dispatching.
     
-    if (!noClassesRemapped()) {
+    // 3. 类引用重映射
+    
+    /**
+     _read_images(...)中以下代码用于类重映射。若发现类阶段构建了 future class 的实体类，则镜像中原指向 future class 的类引用 以及父类引用 需要指向实体类，这就是类引用重映射过程。具体过程如下：
+        1.调用_getObjc2ClassRefs(...)函数获取镜像中__objc_classrefs数据 section 中保存的所有类引用；
+     
+        2.遍历所有类引用：调用remapClassRef(Class *clsref)重映射类引用。
+     
+        3.内部逻辑是当检测到remppedClass哈希表内Key为*clsref的Value值newCls不等于*clsref时，表示该类需要重新映射，将clsref指向newCls；
+         调用_getObjc2SuperRefs(...)函数获取镜像中__objc_superrefs数据 section 中保存的所有父类引用；
+     
+        4.遍历所有类引用：调用remapClassRef(Class *clsref)重映射父类引用。
+     */
+    
+    if (!noClassesRemapped()) { // 若发现类阶段有处理 future class 即有类的重映射,则需要'类引用'重映射
         for (EACH_HEADER) {
             Class *classrefs = _getObjc2ClassRefs(hi, &count);
             for (i = 0; i < count; i++) {
+                // 重新映射镜像中定义的类的引用
                 remapClassRef(&classrefs[i]);
             }
             // fixme why doesn't test future1 catch the absence of this?
             classrefs = _getObjc2SuperRefs(hi, &count);
             for (i = 0; i < count; i++) {
+                // 重新映射镜像中包含的 super
                 remapClassRef(&classrefs[i]);
             }
         }
@@ -2592,6 +2765,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     ts.log("IMAGE TIMES: remap classes");
 
     // Fix up @selector references
+    // 4. 获取__objc_selrefs数据section中定义的选择器，添加到namedSelectors哈希表，忽略
     static size_t UnfixedSelectors;
     {
         mutex_locker_t lock(selLock);
@@ -2612,6 +2786,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
 #if SUPPORT_FIXUP
     // Fix up old objc_msgSend_fixup call sites
+    
+    // 5. 获取__objc_msgrefs数据section中定义的消息，添加消息的选择器到namedSelectors 哈希表，若其IMP指向预定义的IMP，则需要保证其指向新版本runtime定义的IMP，忽略
     for (EACH_HEADER) {
         message_ref_t *refs = _getObjc2MessageRefs(hi, &count);
         if (count == 0) continue;
@@ -2629,6 +2805,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 #endif
 
     // Discover protocols. Fix up protocol refs.
+    // 6. 发现协议，忽略
     for (EACH_HEADER) {
         extern objc_class OBJC_CLASS_$_Protocol;
         Class cls = (Class)&OBJC_CLASS_$_Protocol;
@@ -2649,6 +2826,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     // Fix up @protocol references
     // Preoptimized images may have the right 
     // answer already but we don't know for sure.
+    
+    // 7. 协议排序，忽略
     for (EACH_HEADER) {
         protocol_t **protolist = _getObjc2ProtocolRefs(hi, &count);
         for (i = 0; i < count; i++) {
@@ -2659,13 +2838,20 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     ts.log("IMAGE TIMES: fix up @protocol references");
 
     // Realize non-lazy classes (for +load methods and static instances)
+    
+    // 8. 认识非懒加载类 （确定其class_rw_t数据的内存地址，以及确定类的对象内存布局）
+    /**
+     完成 future class 解析和类重映射后，就可以确定需要加载的类的内存地址。此时需要对需要加载的类进行 class realizing 以确定其class_rw_t数据的内存地址，以及确定类的对象内存布局。
+     非懒加载类的 class realizing 的代码如下，通过调用realizeClass(...)函数实现：
+     */
     for (EACH_HEADER) {
         classref_t *classlist = 
             _getObjc2NonlazyClassList(hi, &count);
         for (i = 0; i < count; i++) {
             Class cls = remapClass(classlist[i]);
             if (!cls) continue;
-
+            
+            // 模拟器环境特殊配置，忽略
             // hack for class __ARCLite__, which didn't get this above
 #if TARGET_OS_SIMULATOR
             if (cls->cache._buckets == (void*)&_objc_empty_cache  &&  
@@ -2682,7 +2868,24 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             }
 #endif
             
+            /***********************************************************************
+            * addClassTableEntry
+            * Add a class to the table of all classes. If addMeta is true,
+            * automatically adds the metaclass of the class as well.
+            * Locking: runtimeLock must be held by the caller.
+            **********************************************************************/
+            /// runtime是否已经认识该类，认识会将其存放到allocatedClasses这个全局hash表中
             addClassTableEntry(cls);
+            
+            
+            /***********************************************************************
+            * realizeClass
+            * Performs first-time initialization on class cls,
+            * including allocating its read-write data.
+            * Returns the real class structure for the class.
+            **********************************************************************/
+           
+            // 对需要加载的类进行 class realizing 以确定其class_rw_t数据的内存地址，以及确定类的对象内存布局。
             realizeClass(cls);
         }
     }
@@ -2690,8 +2893,11 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     ts.log("IMAGE TIMES: realize non-lazy classes");
 
     // Realize newly-resolved future classes, in case CF manipulates them
+    
+    // 9. 认识懒加载类
     if (resolvedFutureClasses) {
         for (i = 0; i < resolvedFutureClassCount; i++) {
+            // 继续进行已解析的 future class 的 class realizing 过程
             realizeClass(resolvedFutureClasses[i]);
             resolvedFutureClasses[i]->setInstancesRequireRawIsa(false/*inherited*/);
         }
@@ -2700,12 +2906,35 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     ts.log("IMAGE TIMES: realize future classes");
 
-    // Discover categories. 
+    // Discover categories.
+    
+    // 10. 发现分类
     for (EACH_HEADER) {
+        
+        /**
+         分类中扩展类的遵循协议列表、属性列表、方法列表需要在运行时添加到类的class_rw_t数据中，该过程必须在类的内存地址、class_rw_t内存地址、类的对象内存布局确定后方能进行。大致过程如下：
+
+         .调用_getObjc2CategoryList(...)函数获取镜像的__objc_catlist数据 section 中保存的镜像中定义的分类列表；
+         
+         .遍历分类列表；
+         
+         .若分类所扩展的类为空则报错，并直接处理下一个分类；
+         
+         .若分类扩展元素包括协议列表或实例属性或实例方法，则将调用addUnattachedCategoryForClass(...)将分类添加到扩展类的待处理分类哈希表，
+          然后调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的class_rw_t数据中；
+         
+         .若分类扩展元素包括协议列表或类属性或类方法，则将调用addUnattachedCategoryForClass(...)将分类添加到扩展类的元类的待处理分类哈希表，
+          然后调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的元类的class_rw_t数据中；
+         
+         */
+        
+        // 调用_getObjc2CategoryList(...)函数获取镜像的__objc_catlist数据 section 中保存的镜像中定义的分类列表
         category_t **catlist = 
             _getObjc2CategoryList(hi, &count);
+        
         bool hasClassProperties = hi->info()->hasCategoryClassProperties();
 
+        // 遍历分类列表
         for (i = 0; i < count; i++) {
             category_t *cat = catlist[i];
             Class cls = remapClass(cat->cls);
@@ -2713,6 +2942,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             if (!cls) {
                 // Category's target class is missing (probably weak-linked).
                 // Disavow any knowledge of this category.
+                
+                // 分类所扩展的类为空则报错
                 catlist[i] = nil;
                 if (PrintConnecting) {
                     _objc_inform("CLASS: IGNORING category \?\?\?(%s) %p with "
@@ -2725,13 +2956,18 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             // Process this category. 
             // First, register the category with its target class. 
             // Then, rebuild the class's method lists (etc) if 
-            // the class is realized. 
+            // the class is realized.
+            
+            // 协议、实例方法、实例属性添加到类的class_rw_t中
+           
             bool classExists = NO;
             if (cat->instanceMethods ||  cat->protocols  
                 ||  cat->instanceProperties) 
             {
+                // 调用addUnattachedCategoryForClass(...)将分类添加到扩展类的待处理分类哈希表，
                 addUnattachedCategoryForClass(cat, cls, hi);
                 if (cls->isRealized()) {
+                     // 然后调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的class_rw_t数据中
                     remethodizeClass(cls);
                     classExists = YES;
                 }
@@ -2742,11 +2978,14 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 }
             }
 
+            // 协议、类方法、类属性添加到类的元类的class_rw_t中
             if (cat->classMethods  ||  cat->protocols  
                 ||  (hasClassProperties && cat->_classProperties)) 
             {
+                // 调用addUnattachedCategoryForClass(...)将分类添加到扩展类的元类的待处理分类哈希表
                 addUnattachedCategoryForClass(cat, cls->ISA(), hi);
                 if (cls->ISA()->isRealized()) {
+                    // 调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的元类的class_rw_t数据中
                     remethodizeClass(cls->ISA());
                 }
                 if (PrintConnecting) {
@@ -4213,13 +4452,14 @@ objc_class::getLoadMethod()
     assert(ISA()->isRealized());
     assert(!isMetaClass());
     assert(ISA()->isMetaClass());
-
+    
+    // 在类的基础方法列表中查询load方法的IMP
     mlist = ISA()->data()->ro->baseMethods();
     if (mlist) {
         for (const auto& meth : *mlist) {
             const char *name = sel_cname(meth.name);
             if (0 == strcmp(name, "load")) {
-                return meth.imp;
+                return meth.imp; /// 返回load方法实现地址
             }
         }
     }
@@ -5103,14 +5343,20 @@ objc_class::setInitialized()
 
     bool inherited;
     bool metaCustomAWZ = NO;
+    
+    /************** 检查是否有自定义的 +allocWithZone 类方法****************/
+    
+    // 查看根元类的是否被交换了AWZ方法
     if (MetaclassNSObjectAWZSwizzled) {
         // Somebody already swizzled NSObject's methods
         metaCustomAWZ = YES;
-        inherited = NO;
+        inherited = NO;  /// 并非继承来的AWZ
     }
+    // 根元类NSObject
     else if (metacls == classNSObject()->ISA()) {
         // NSObject's metaclass AWZ is default, but we still need to check cats
         auto& methods = metacls->data()->methods;
+        // 查看根元类NSObject的分类有没有重写AWZ
         for (auto mlists = methods.beginCategoryMethodLists(), 
                   end = methods.endCategoryMethodLists(metacls); 
              mlists != end;
@@ -5118,15 +5364,15 @@ objc_class::setInitialized()
         {
             if (methodListImplementsAWZ(*mlists)) {
                 metaCustomAWZ = YES;
-                inherited = NO;
+                inherited = NO; /// 并非继承来的AWZ
                 break;
             }
         }
     }
-    else if (metacls->superclass->hasCustomAWZ()) {
+    else if (metacls->superclass->hasCustomAWZ()) { /// 查看元类的继承链中是否有自定义AWZ
         // Superclass is custom AWZ, therefore we are too.
         metaCustomAWZ = YES;
-        inherited = YES;
+        inherited = YES; // 继承来的AWZ
     } 
     else {
         // Not metaclass NSObject.
@@ -5136,26 +5382,28 @@ objc_class::setInitialized()
              mlists != end;
              ++mlists)
         {
-            if (methodListImplementsAWZ(*mlists)) {
+            if (methodListImplementsAWZ(*mlists)) {/// 该元类本身有自定义AWZ
                 metaCustomAWZ = YES;
-                inherited = NO;
+                inherited = NO;         /// 并非继承来的AWZ
                 break;
             }
         }
     }
-    if (!metaCustomAWZ) metacls->setHasDefaultAWZ();
-
+    if (!metaCustomAWZ) metacls->setHasDefaultAWZ(); /// 设计标志位 有默认的AWZ
     if (PrintCustomAWZ  &&  metaCustomAWZ) metacls->printCustomAWZ(inherited);
+    
+    
+    /************** 检查是否有自定义的 retain\release\autorelease\.....等对象方法 ****************/
+
     // metacls->printCustomRR();
 
-
     bool clsCustomRR = NO;
-    if (ClassNSObjectRRSwizzled) {
+    if (ClassNSObjectRRSwizzled) { /// 该方法被交换了
         // Somebody already swizzled NSObject's methods
         clsCustomRR = YES;
         inherited = NO;
     }
-    if (cls == classNSObject()) {
+    if (cls == classNSObject()) { /// 如果是NSObject类
         // NSObject's RR is default, but we still need to check categories
         auto& methods = cls->data()->methods;
         for (auto mlists = methods.beginCategoryMethodLists(), 
@@ -5163,19 +5411,19 @@ objc_class::setInitialized()
              mlists != end;
              ++mlists)
         {
-            if (methodListImplementsRR(*mlists)) {
+            if (methodListImplementsRR(*mlists)) { /// 分类中重写这些方法
                 clsCustomRR = YES;
                 inherited = NO;
                 break;
             }
         }
     }
-    else if (!cls->superclass) {
+    else if (!cls->superclass) { /// 自定义的根类
         // Custom root class
         clsCustomRR = YES;
         inherited = NO;
     } 
-    else if (cls->superclass->hasCustomRR()) {
+    else if (cls->superclass->hasCustomRR()) { /// 继承链中有自定义这些方法
         // Superclass is custom RR, therefore we are too.
         clsCustomRR = YES;
         inherited = YES;
@@ -5188,15 +5436,15 @@ objc_class::setInitialized()
              mlists != end;
              ++mlists)
         {
-            if (methodListImplementsRR(*mlists)) {
+            if (methodListImplementsRR(*mlists)) { /// 该类自定义这些方法
                 clsCustomRR = YES;
                 inherited = NO;
                 break;
             }
         }
     }
-    if (!clsCustomRR) cls->setHasDefaultRR();
-
+    if (!clsCustomRR) cls->setHasDefaultRR(); /// 设置标记位
+ 
     // cls->printCustomAWZ();
     if (PrintCustomRR  &&  clsCustomRR) cls->printCustomRR(inherited);
 

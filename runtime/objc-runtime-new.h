@@ -1097,6 +1097,8 @@ public:
 
 #if FAST_HAS_DEFAULT_RR
     bool hasDefaultRR() {
+        /// class or superclass has default retain/release/autorelease/retainCount/
+        ///   _tryRetain/_isDeallocating/retainWeakReference/allowsWeakReference
         return getBit(FAST_HAS_DEFAULT_RR);
     }
     void setHasDefaultRR() {
@@ -1428,20 +1430,24 @@ struct objc_class : objc_object {
     void setShouldGrowCache(bool) {
         // fixme good or bad for memory use?
     }
-
+    
+    // 查询是否正在初始化（initializing）
     bool isInitializing() {
         return getMeta()->data()->flags & RW_INITIALIZING;
     }
-
+    
+    // 标记为正在初始化（initializing）
     void setInitializing() {
         assert(!isMetaClass());
         ISA()->setInfo(RW_INITIALIZING);
     }
 
+    // 是否已完成初始化（initializing）
     bool isInitialized() {
         return getMeta()->data()->flags & RW_INITIALIZED;
     }
 
+    // 实现写在.mm文件中
     void setInitialized();
 
     bool isLoadable() {
@@ -1449,15 +1455,19 @@ struct objc_class : objc_object {
         return true;  // any class registered for +load is definitely loadable
     }
 
+    // 实现写在.mm文件中
     IMP getLoadMethod();
 
     // Locking: To prevent concurrent realization, hold runtimeLock.
+    // runtime是否已认识类
     bool isRealized() {
         return data()->flags & RW_REALIZED;
     }
 
     // Returns true if this is an unrealized future class.
     // Locking: To prevent concurrent realization, hold runtimeLock.
+    
+    // 是否future class
     bool isFuture() { 
         return data()->flags & RW_FUTURE;
     }

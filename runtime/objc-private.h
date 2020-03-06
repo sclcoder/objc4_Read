@@ -308,8 +308,11 @@ struct header_info;
 // Split out the rw data from header info.  For now put it in a huge array
 // that more than exceeds the space needed.  In future we'll just allocate
 // this in the shared cache builder.
+
+// 用于记录镜像以及镜像中的 Objective-C 元素的状态，该成员的数据是可读写的。
 typedef struct header_info_rw {
 
+    // 公开的API
     bool getLoaded() const {
         return isLoaded;
     }
@@ -340,27 +343,34 @@ private:
     uintptr_t allClassesRealized    : 1;
     uintptr_t next                  : 62;
 #else
-    uintptr_t isLoaded              : 1;
-    uintptr_t allClassesRealized    : 1;
-    uintptr_t next                  : 30;
+    uintptr_t isLoaded              : 1;    // 最低位isLoaded标记镜像是否已加载；
+    uintptr_t allClassesRealized    : 1;    // 次低位allClassesRealized标记镜像中所有的 Objective-C 类是否已完成 class realizing；
+    uintptr_t next                  : 30;   // 用于保存下一个header_info节点的地址，由于地址的最低 3 位必为0因此实际上仅需保存最低 3 位之外的位即可，又因为header_info_rw仅用了最低 2 位作为特殊标记位，因此指定当前header_info* curHeader指向下一个节点header_info* nextHeader时，仅需设置((header_info_rw*)&curHeader->rw_data[0])->next = nextHeader >> 2。
 #endif
 } header_info_rw;
 
 struct header_info_rw* getPreoptimizedHeaderRW(const struct header_info *const hdr);
 
+/// 用于快速定位镜像中的头信息（mach_header_64结构体）、镜像信息。镜像信息用于标记镜像的属性，以objc_image_info结构体格式保存于 镜像文件的__DATA数据段的__objc_imageinfo data section，镜像信息在构建镜像文件时生成
+
+
+
 typedef struct header_info {
 private:
     // Note, this is no longer a pointer, but instead an offset to a pointer
     // from this location.
+    // 保存镜像中的头信息mach_header_64相对当前header_info的内存地址偏移
     intptr_t mhdr_offset;
 
     // Note, this is no longer a pointer, but instead an offset to a pointer
     // from this location.
+    // 保存镜像中的镜像信息相对当前header_info的内存地址偏移
     intptr_t info_offset;
 
     // Do not add fields without editing ObjCModernAbstraction.hpp
 public:
-
+    
+    // 公开的API
     header_info_rw *getHeaderInfoRW() {
         header_info_rw *preopt =
             isPreoptimized() ? getPreoptimizedHeaderRW(this) : nil;
@@ -375,7 +385,8 @@ public:
     void setmhdr(const headerType *mhdr) {
         mhdr_offset = (intptr_t)mhdr - (intptr_t)&mhdr_offset;
     }
-
+  
+    /// 镜像信息用于标记镜像的属性，以objc_image_info结构体格式保存于 镜像文件的__DATA数据段的__objc_imageinfo data section，镜像信息在构建镜像文件时生成
     const objc_image_info *info() const {
         return (const objc_image_info *)(((intptr_t)&info_offset) + info_offset);
     }
@@ -440,6 +451,8 @@ public:
 private:
     // Images in the shared cache will have an empty array here while those
     // allocated at run time will allocate a single entry.
+    // 用于记录镜像以及镜像中的 Objective-C 元素的状态，该成员的数据是可读写的。
+    // 虽然定义为数组，但是包含的元素基本为1个，不会超过1个。
     header_info_rw rw_data[];
 } header_info;
 

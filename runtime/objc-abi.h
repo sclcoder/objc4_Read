@@ -108,10 +108,12 @@ typedef struct objc_image_info {
         IsSimulated         = 1<<5,  // image compiled for a simulator platform
         HasCategoryClassProperties  = 1<<6,  // class properties in category_t
 
+        // Swift版本兼容相关，忽略
         SwiftVersionMaskShift = 8,
         SwiftVersionMask    = 0xff << SwiftVersionMaskShift  // Swift ABI version
 
     };
+   // Swift版本兼容相关，忽略
    public:
     enum : uint32_t {
         SwiftVersion1   = 1,
@@ -120,6 +122,7 @@ typedef struct objc_image_info {
         SwiftVersion3   = 4
     };
 
+  // 公开的API，忽略
   public:
     bool isReplacement()   const { return flags & IsReplacement; }
     bool supportsGC()      const { return flags & SupportsGC; }

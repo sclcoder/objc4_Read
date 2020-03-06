@@ -208,14 +208,17 @@ void appendHeader(header_info *hi)
     hi->setNext(NULL);
     if (!FirstHeader) {
         // list is empty
+        // 链表为空
         FirstHeader = LastHeader = hi;
     } else {
         if (!LastHeader) {
             // list is not empty, but LastHeader is invalid - recompute it
+            // 找到最后一个节点
             LastHeader = FirstHeader;
             while (LastHeader->getNext()) LastHeader = LastHeader->getNext();
         }
         // LastHeader is now valid
+        // 添加到最后一个节点后面
         LastHeader->setNext(hi);
         LastHeader = hi;
     }

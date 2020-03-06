@@ -45,9 +45,11 @@ static SEL search_builtins(const char *key);
 void sel_init(size_t selrefCount)
 {
     // save this value for later
+    // 保存到SelrefCount静态的int中，只是为了后面初始化namedSelectors哈希表时提供初始size
     SelrefCount = selrefCount;
 
-#if SUPPORT_PREOPT
+    // 预处理优化Selector，忽略
+#if SUPPORT_PREOPT  // Define SUPPORT_PREOPT=1 to enable dyld shared cache optimizations
     builtins = preoptimizedSelectors();
 
     if (PrintPreopt  &&  builtins) {
@@ -63,7 +65,7 @@ void sel_init(size_t selrefCount)
 #endif
 
     // Register selectors used by libobjc
-
+    // sel_registerNameNoLock用于将SEL添加到全局的namedSelectors哈希表中，方便系统快速判断某个SEL是否可识别
 #define s(x) SEL_##x = sel_registerNameNoLock(#x, NO)
 #define t(x,y) SEL_##y = sel_registerNameNoLock(#x, NO)
 
