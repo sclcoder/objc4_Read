@@ -44,11 +44,16 @@ struct loadable_category {
 
 // List of classes that need +load called (pending superclass +load)
 // This list always has superclasses first because of the way it is constructed
+
+// 数组容器，记录包含load方法的所有类的信息
 static struct loadable_class *loadable_classes = nil;
+//数组内存中存在冗余空间，用loadable_classes_used实际保存的单元数量
 static int loadable_classes_used = 0;
+//数组内存中存在冗余空间，因此用loadable_classes_allocated记录分配的单元数量
 static int loadable_classes_allocated = 0;
 
 // List of categories that need +load called (pending parent class +load)
+// 数组容器，记录包含load方法的所有分类的信息
 static struct loadable_category *loadable_categories = nil;
 static int loadable_categories_used = 0;
 static int loadable_categories_allocated = 0;
@@ -72,7 +77,12 @@ void add_class_to_loadable_list(Class cls)
         _objc_inform("LOAD: class '%s' scheduled for +load", 
                      cls->nameForLogging());
     }
+    /**
+     loadable_classes_used记录loadable_classes实际保存的loadable_class结构体数量
+     loadable_classes_allocated记录为数组分配的用于保存loadable_class结构体的内存单元数量
+     */
     
+    // loadable_classes数组扩容，因此loadable_classes数组中是存在冗余空间的，这是loadable_classes_allocated存在原因
     if (loadable_classes_used == loadable_classes_allocated) {
         loadable_classes_allocated = loadable_classes_allocated*2 + 16;
         loadable_classes = (struct loadable_class *)
@@ -93,6 +103,8 @@ void add_class_to_loadable_list(Class cls)
 * to its class. Schedule this category for +load after its parent class
 * becomes connected and has its own +load method called.
 **********************************************************************/
+
+// ------- 将分类类添加到loadable_categories数组 ------- //
 void add_category_to_loadable_list(Category cat)
 {
     IMP method;
@@ -109,6 +121,7 @@ void add_category_to_loadable_list(Category cat)
                      _category_getClassName(cat), _category_getName(cat));
     }
     
+    // loadable_categories数组扩容
     if (loadable_categories_used == loadable_categories_allocated) {
         loadable_categories_allocated = loadable_categories_allocated*2 + 16;
         loadable_categories = (struct loadable_category *)
@@ -183,11 +196,20 @@ void remove_category_from_loadable_list(Category cat)
 **********************************************************************/
 static void call_class_loads(void)
 {
+    /**
+     由于在prepare_load_methods已经确定了类的load方法执行顺序，因此call_class_loads(void)仅需简单迭代执行loadable_class中的load方法即可。处理过程大致如下：
+         .将局部变量classes指向loadable_classes，将loadable_classes指向nil。classes表示本次需要执行的所有类的load方法，为旧容器。loadable_classes表示本次执行的类的load方法中动态载入的所有新类的load方法，为新容器；
+         .遍历classes中所有loadable_class结构体，执行其method所指向的load方法。遍历classes时，若load方法中载入了新的类的load方法，则又会被收集于loadable_classes所指向的新容器中；
+     
+         .释放classes局部变量所指向的旧容器内存空间；
+     
+     */
     int i;
     
-    // Detach current loadable list.
+    // Detach（分离） current loadable list.
     struct loadable_class *classes = loadable_classes;
     int used = loadable_classes_used;
+    // loadable_classes指向nil
     loadable_classes = nil;
     loadable_classes_allocated = 0;
     loadable_classes_used = 0;
@@ -201,11 +223,13 @@ static void call_class_loads(void)
         if (PrintLoading) {
             _objc_inform("LOAD: +[%s load]\n", cls->nameForLogging());
         }
+        // 执行load方法。load方法可能包含动态加载镜像的逻辑，此时loadable_classes则会指向
+        // 新的容器来收集动态加载镜像中的load方法
         (*load_method)(cls, SEL_load);
     }
     
     // Destroy the detached list.
-    if (classes) free(classes);
+    if (classes) free(classes); // 释放旧容器
 }
 
 
@@ -223,19 +247,34 @@ static void call_class_loads(void)
 **********************************************************************/
 static bool call_category_loads(void)
 {
+    
+    /**
+     .局部变量cats指向loadable_categories表示旧容器。loadable_categories指向nil表示新容器；
+     
+     .遍历旧容器中的所有loadable_category结构体，若loadable_category的cls成员非空且可加载，则执行method成员指向的load方法，并把cat成员置nil；
+     
+     .用cats收集 旧容器中未执行load方法的所有分类（判断cat成员非空）；
+     
+     .用cats收集 执行旧容器的load方法过程中动态载入的所有分类；
+     
+     .若cats保存的loadable_category结构体数量大于0，则设置loadable_categories指向cats所指向的内存空间；反之loadable_categories置nil。
+     */
     int i, shift;
     bool new_categories_added = NO;
     
     // Detach current loadable list.
+    // 局部变量cats指向loadable_categories表示旧容器。
     struct loadable_category *cats = loadable_categories;
     int used = loadable_categories_used;
     int allocated = loadable_categories_allocated;
+    // loadable_categories指向nil表示新容器；
     loadable_categories = nil;
     loadable_categories_allocated = 0;
     loadable_categories_used = 0;
 
     // Call all +loads for the detached list.
     for (i = 0; i < used; i++) {
+        // 遍历旧容器中的所有loadable_category结构体
         Category cat = cats[i].cat;
         load_method_t load_method = (load_method_t)cats[i].method;
         Class cls;
@@ -248,12 +287,17 @@ static bool call_category_loads(void)
                              cls->nameForLogging(), 
                              _category_getName(cat));
             }
+            // 若loadable_category的cls成员非空且可加载，则执行method成员指向的load方法，并把cat成员置nil
             (*load_method)(cls, SEL_load);
             cats[i].cat = nil;
         }
     }
 
     // Compact detached list (order-preserving)
+    
+    // 收集上面for循环未执行load方法的所有分类，其中包含了load方法中可能存在动态加载
+    // 镜像时载入的分类的load方法，这些load方法不能立刻执行，需要其扩展类的load方法
+    // 执行完毕后才能执行。
     shift = 0;
     for (i = 0; i < used; i++) {
         if (cats[i].cat) {
@@ -262,10 +306,15 @@ static bool call_category_loads(void)
             shift++;
         }
     }
+    // loadable_categories旧容器中尚未执行load方法的loadable_category结构体数量，这些
+    // loadable_category均保留在loadable_categories新容器
     used -= shift;
 
     // Copy any new +load candidates from the new list to the detached list.
+    // 若loadable_categories_used大于0，说明在执行分类load方法时收集到新的分类load方法
     new_categories_added = (loadable_categories_used > 0);
+    
+    // 将新收集的分类load方法添加到loadable_categories新容器
     for (i = 0; i < loadable_categories_used; i++) {
         if (used == allocated) {
             allocated = allocated*2 + 16;
@@ -277,10 +326,13 @@ static bool call_category_loads(void)
     }
 
     // Destroy the new list.
+    // 释放旧loadable_categories容器
     if (loadable_categories) free(loadable_categories);
 
     // Reattach the (now augmented) detached list. 
     // But if there's nothing left to load, destroy the list.
+    
+    // 赋值新loadable_categories容器
     if (used) {
         loadable_categories = cats;
         loadable_categories_used = used;
@@ -336,6 +388,15 @@ static bool call_category_loads(void)
 **********************************************************************/
 void call_load_methods(void)
 {
+    
+    /**
+     从loadable_classes容器及loadable_categories容器中推出类和分类，依次调用load方法。
+     
+     call_load_methods(void)代码的逻辑比较怪异，
+     在do-while循环内部的while循环明明已经判断loadable_classes_used <= 0，为什么在do-while还要判断loadable_classes_used > 0进入下一次迭代？
+     这是因为类、分类的load方法中，均可能存在动态加载镜像文件的逻辑，从而引入新的类、分类的load方法。do-while循环内部，执行类的load方法使用了一个while循环，而执行分类的load方法则只调用了一次，这是因为分类load方法必须等待其扩展类的load方法执行完毕才能执行，因此需要立即进入下一次迭代以执行扩展类的load方法。
+
+     */
     static bool loading = NO;
     bool more_categories;
 
@@ -349,14 +410,17 @@ void call_load_methods(void)
 
     do {
         // 1. Repeatedly call class +loads until there aren't any more
+        // 1. 遍历并执行类的所有可调用的load方法
         while (loadable_classes_used > 0) {
             call_class_loads();
         }
 
         // 2. Call category +loads ONCE
+        // 2. 执行分类的load方法
         more_categories = call_category_loads();
 
         // 3. Run more +loads if there are classes OR more untried categories
+        // 3. 循环直到类及分类的所有load方法均被执行
     } while (loadable_classes_used > 0  ||  more_categories);
 
     objc_autoreleasePoolPop(pool);

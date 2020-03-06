@@ -2241,21 +2241,32 @@ map_images(unsigned count, const char * const paths[],
 extern bool hasLoadMethods(const headerType *mhdr);
 extern void prepare_load_methods(const headerType *mhdr);
 
+/**
+ load_images的逻辑基于map_images所加载的类、分类信息进行。load_images主要调用了两个函数：
+ 
+     prepare_load_methods(...)：执行类、分类的load方法进行类的初始化之前的准备工作，主要是收集镜像中实现了load方法的类和分类；
+     void call_load_methods(void)：调用类、分类中的load方法初始化类；
+
+ prepare_load_methods和call_load_methods是成对存在的两个操作，前者记录实现了load方法的类、分类，后者按正确的顺序调用所记录的类和分类的load方法。
+ */
 void
 load_images(const char *path __unused, const struct mach_header *mh)
 {
     // Return without taking locks if there are no +load methods here.
+    // 若镜像中的所有类、分类均未实现load方法，则直接返回
     if (!hasLoadMethods((const headerType *)mh)) return;
 
     recursive_mutex_locker_t lock(loadMethodLock);
 
     // Discover load methods
+    // 收集镜像中实现了load方法的类和分类
     {
         mutex_locker_t lock2(runtimeLock);
         prepare_load_methods((const headerType *)mh);
     }
 
     // Call +load methods (without runtimeLock - re-entrant)
+    // 执行prepare_load_methods收集的类和分类的load方法
     call_load_methods();
 }
 
@@ -3079,6 +3090,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 **********************************************************************/
 // Recursively schedule +load for cls and any un-+load-ed superclasses.
 // cls must already be connected.
+
+// ------- 将类添加到loadable_classes数组 ------- //
 static void schedule_class_load(Class cls)
 {
     if (!cls) return;
@@ -3087,6 +3100,8 @@ static void schedule_class_load(Class cls)
     if (cls->data()->flags & RW_LOADED) return;
 
     // Ensure superclass-first ordering
+    // 调用add_class_to_loadable_list(cls)将类loadable_class数组容器前，
+    // 递归调用了schedule_class_load(cls->superclass)，以保证父类的load方法先于子类load方法执行
     schedule_class_load(cls->superclass);
 
     add_class_to_loadable_list(cls);
@@ -3107,13 +3122,27 @@ void prepare_load_methods(const headerType *mhdr)
     size_t count, i;
 
     runtimeLock.assertLocked();
-
+    
+    /**
+     prepare_load_methods包含两大步骤：
+     
+     1.获取镜像中所有非懒加载类，依次调用schedule_class_load(...)函数将包含load方法的类添加到loadable_class数组容器。
+     schedule_class_load(...)函数内部，在调用add_class_to_loadable_list(cls)将类loadable_class数组容器前，
+     递归调用了schedule_class_load(cls->superclass)，以保证父类的load方法先于子类load方法执行；
+     
+     2.获取镜像中所有非懒加载分类，依次调用add_category_to_loadable_list(...)函数将包含load方法的类添加到loadable_category数组容器。
+     注意在这之前需要保证分类所扩展的类完成 class realizing；
+     
+     */
+    
+     // 获取二进制文件中，非懒加载的所有类的信息
     classref_t *classlist = 
         _getObjc2NonlazyClassList(mhdr, &count);
     for (i = 0; i < count; i++) {
         schedule_class_load(remapClass(classlist[i]));
     }
-
+    
+    // 获取二进制文件中，非懒加载的所有分类的信息
     category_t **categorylist = _getObjc2NonlazyCategoryList(mhdr, &count);
     for (i = 0; i < count; i++) {
         category_t *cat = categorylist[i];
