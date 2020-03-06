@@ -81,6 +81,13 @@ union isa_t {
     Class cls; /// objc_class *类型的指针 在64位的CPU架构中8个字节64bit
     /// 启用isa优化
     uintptr_t bits; /// unsigned long 在64位的CPU架构中占8个字节即64bit
+    /**
+     非指针类型isa实际是将 side table 中部分内存管理数据（包括部分内存引用计数、是否包含关联对象标记、是否被弱引用标记、是否已析构标记）转移到isa中，
+     从而减少objc_object中内存管理相关操作的 side table 查询数量。
+     objc_object中关于状态查询的方法，大多涉及到isa的位操作。方法数量有点多不一一列举，可以查看弱引用相关查询为例
+     */
+    
+    
     
     /// 结构体:64bit。 对bits的每一位的说明
 #if defined(ISA_BITFIELD)
@@ -106,13 +113,26 @@ union isa_t {
          #   define ISA_MAGIC_VALUE 0x000001a000000001ULL
          #   define ISA_BITFIELD
                uintptr_t nonpointer        : 1;  是否开启isa优化
+                                                 0表示isa为指针类型，存储类的地址；1表示isa为非指针类型。之所以使用最低位区分isa类型，是因为当isa为Class时，其本质是指向objc_class结构体首地址的指针，由于objc_class必定按WORD对齐，即地址必定是8的整数倍，因此指针类型的isa的末尾3位必定全为0
+         
+         
                uintptr_t has_assoc         : 1;  是否有关联对象
-               uintptr_t has_cxx_dtor      : 1;  是否有c++析构
-               uintptr_t shiftcls          : 33  保存类的虚拟内存地址。
+         
+         
+               uintptr_t has_cxx_dtor      : 1;  标记对象是否存在cxx语系的析构函数。使用指针类型isa的对象，该标记保存在 side table 中
+                                                 
+         
+         
+               uintptr_t shiftcls          : 33  保存类的虚拟内存地址，标记对象的类型（核心数据）
+         
                uintptr_t magic             : 6;  用于非指针类型的isa校验，arm64架构下这6位为固定值0x1a；
-               uintptr_t weakly_referenced : 1;  是否有弱引用变量
-               uintptr_t deallocating      : 1;  对象是否已执行析构（对象over release相关提示）；
-               uintptr_t has_sidetable_rc  : 1;  是否开启了sidetable记录引用计数
+         
+               uintptr_t weakly_referenced : 1;  标记对象是否被弱引用。使用指针类型isa的对象，该标记保存在 side table 中
+         
+               uintptr_t deallocating      : 1;  标记对象是否已执行析构。使用指针类型isa的对象，该标记保存在 side table 中
+         
+               uintptr_t has_sidetable_rc  : 1;  标记是否联合 side table 保存该对象的引用计数
+         
                uintptr_t extra_rc          : 19  值为引用计数-1
                                                  其实在绝大多数情况下，仅用优化的isa_t来记录对象的引用计数就足够了。
                                                  只有在19位的extra_rc盛放不了那么大的引用计数时，才会借助SideTable出马。
@@ -123,6 +143,22 @@ union isa_t {
 #endif
 };
 
+/**
+ 对象的数据结构是objc_object结构体。objc_object仅包含一个isa_t类型的isa指针，和<objc/runtime>定义的objc_object有所不同，后者的isa指针是Class（指向objc_class结构体）。
+ 这是因为新版本 runtime 支持非指针类型isa结构，非指针类型isa不再是指向Class的指针而是64位二进制位域，仅使用其中一部分位域保存对象的类的地址，
+ 其他位赋予特殊意义主要用于协助对象内存管理。
+ 
+ objc_object包含的方法主要有以下几类：
+
+ .isa操作相关，isa指向对象类型，在控制对象构建、对象成员变量访问、对象消息响应，对象内存管理方面有十分关键的作用
+ .关联对象（associated object）相关；
+ .对象弱引用相关，对象释放后需要通知弱引用自动置nil，因此对象需要知晓所有弱引用的地址；
+ .引用计数相关，支持对象的引用计数（reference count）管理；
+ .dealloc相关，对象析构相关，主要是释放对关联对象的引用；
+ .side table 相关，side table 是 runtime 管理对象内存的核心数据结构，包含对象内存引用计数信息、对象的弱引用信息等关键数据（TODO：后续在独立文章中介绍）；
+ .支持非指针类型isa相关；
+
+ */
 
 struct objc_object {
 private:
@@ -138,9 +174,11 @@ private:
 public:
 
     // ISA() assumes this is NOT a tagged pointer object
+    // 获取对象类型，建立在对象不是tagged pointer的假设上
     Class ISA();
 
     // getIsa() allows this to be a tagged pointer object
+    // 获取对象类型，对象可以是tagged pointer
     Class getIsa();
 
     // initIsa() should be used to init the isa of new objects only.
@@ -149,6 +187,8 @@ public:
     // initClassIsa(): class objects
     // initProtocolIsa(): protocol objects
     // initIsa(): other objects
+    
+    // 初始化isa
     void initIsa(Class cls /*nonpointer=false*/);
     void initClassIsa(Class cls /*nonpointer=maybe*/);
     void initProtocolIsa(Class cls /*nonpointer=maybe*/);
@@ -156,31 +196,42 @@ public:
 
     // changeIsa() should be used to change the isa of existing objects.
     // If this is a new object, use initIsa() for performance.
+    
+    // 设置isa指向新的类型
     Class changeIsa(Class newCls);
 
+    // 对象isa是否为非指针类型
     bool hasNonpointerIsa();
+    // TaggedPointer相关，忽略
     bool isTaggedPointer();
     bool isBasicTaggedPointer();
     bool isExtTaggedPointer();
+    
+    // 对象是否是类
     bool isClass();
 
     // object may have associated objects?
+    // 对象关联对象相关
     bool hasAssociatedObjects();
     void setHasAssociatedObjects();
 
     // object may be weakly referenced?
+    // 对象弱引用相关
     bool isWeaklyReferenced();
     void setWeaklyReferenced_nolock();
 
     // object may have -.cxx_destruct implementation?
+    //对象是否包含 .cxx 构造/析构函数
     bool hasCxxDtor();
 
     // Optimized calls to retain/release methods
+    // 引用计数相关
     id retain();
     void release();
     id autorelease();
 
     // Implementations of retain/release methods
+    // 引用计数相关的实现
     id rootRetain();
     bool rootRelease();
     id rootAutorelease();
@@ -189,6 +240,7 @@ public:
     uintptr_t rootRetainCount();
 
     // Implementation of dealloc methods
+    // dealloc的实现
     bool rootIsDeallocating();
     void clearDeallocating();
     void rootDealloc();
@@ -200,6 +252,7 @@ private:
     id rootAutorelease2();
     bool overrelease_error();
 
+    // 支持非指针类型isa
 #if SUPPORT_NONPOINTER_ISA
     // Unified retain count manipulation for nonpointer isa
     id rootRetain(bool tryRetain, bool handleOverflow);
@@ -209,8 +262,7 @@ private:
 
     void clearDeallocating_slow();
 
-    // Side table retain count overflow for nonpointer isa
-    // Side table保留非指针isa的计数溢出
+    // Side table retain count overflow for nonpointer isa  Side table保留非指针isa的计数溢出
     void sidetable_lock();
     void sidetable_unlock();
 
@@ -220,8 +272,8 @@ private:
     size_t sidetable_getExtraRC_nolock();
 #endif
 
-    // Side-table-only retain count
-    // 只使用Side table 计数
+    // Side-table 相关操作
+    // Side-table-only retain count 只使用Side table 计数
     bool sidetable_isDeallocating();
     void sidetable_clearDeallocating();
 

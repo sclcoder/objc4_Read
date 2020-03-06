@@ -208,6 +208,7 @@ objc_object::initInstanceIsa(Class cls, bool hasCxxDtor)
     initIsa(cls, true, hasCxxDtor);
 }
 
+// cls参数表示对象的类，nonpointer表示是否构建非指针类型isa，hasCxxDtor表示对象是否存在cxx语系析构函数。
 inline void 
 objc_object::initIsa(Class cls, bool nonpointer, bool hasCxxDtor) 
 { 
@@ -229,17 +230,14 @@ objc_object::initIsa(Class cls, bool nonpointer, bool hasCxxDtor)
         newisa.has_cxx_dtor = hasCxxDtor;
         newisa.indexcls = (uintptr_t)cls->classArrayIndex();
 #else
-        
+         // 当前主流机型一般会运行到这个逻辑分支
         // ISA_MAGIC_VALUE 0x000001a000000001ULL(arm64) 初始化了 nonpointer 和 magic两个标志位
-        newisa.bits = ISA_MAGIC_VALUE;
-        // isa.magic is part of ISA_MAGIC_VALUE
-        // isa.nonpointer is part of ISA_MAGIC_VALUE
+        newisa.bits = ISA_MAGIC_VALUE; /// // magic设置为0xA1，nonpointer设置为1
         
         /// 初始化是否有C++析构函数 如果没有析构器就会快速释放内存
         newisa.has_cxx_dtor = hasCxxDtor;
  
-        
-        // 将类的地址存放到isa_t结构的shiftcls位置
+        // shiftcls位域保存对象的类的地址，注意最低3位不需要保存，因为必定是全0
         newisa.shiftcls = (uintptr_t)cls >> 3;
         /**
           将当前地址右移三位的主要原因是用于将 Class 指针中无用的后三位清除减小内存的消耗，因为类的指针要按照字节（8 bits）对齐内存，其指针后三位都是没有意义的 0。
@@ -370,6 +368,8 @@ objc_object::setHasAssociatedObjects()
 inline bool
 objc_object::isWeaklyReferenced()
 {
+    /// isWeaklyReferenced()用于查询对象是否被弱引用。当对象isa为非指针类型时，直接返回isa.weakly_referenced，
+    /// 否则需要调用sidetable_isWeaklyReferenced ()从 side table 中查询结果；
     assert(!isTaggedPointer());
     if (isa.nonpointer) return isa.weakly_referenced;
     else return sidetable_isWeaklyReferenced();
@@ -379,6 +379,7 @@ objc_object::isWeaklyReferenced()
 inline void
 objc_object::setWeaklyReferenced_nolock()
 {
+/// 当对象isa为非指针类型时，仅需将weakly_referenced位置为1，否则需要调用sidetable_setWeaklyReferenced_nolock()从 side table 中查询结果并写入。
  retry:
     isa_t oldisa = LoadExclusive(&isa.bits);
     isa_t newisa = oldisa;
