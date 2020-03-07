@@ -96,12 +96,33 @@ typedef struct classref * classref_t;
 * FlagMask is used to stash extra bits in the entsize field
 *   (e.g. method list fixup markers)
 **********************************************************************/
+
+/**
+ entsize_list_tt是 runtime 定义的一种顺序表模板。
+ entsize_list_tt<typename Element, typename List, uint32_t FlagMask>模板中，Element表示元素的类型，List表示所定义的顺序表容器类型名称，
+ FlagMask用于从entsize_list_tt的entsizeAndFlags获取目标数据（Flag标志 或者 元素占用空间大小）。
+ 
+ 既然entsize_list_tt是顺序表，那么所占用内存空间必然是连续分配的。由于每个元素都是同类型，占用相同大小的内存空间，因此可以通过索引值及首元素地址来定位到具体元素的内存地址。
+ 
+ entsize_list_tt包含三个成员：
+
+ entsizeAndFlags：entsize 是 entry size 的缩写，因此该成员保存了元素  Flag 标志 以及 元素占用空间大小，entsizeAndFlags & ~FlagMask获取元素占用空间大小，entsizeAndFlags & FlagMask获取 Flag 标志（可指定 Flag 标志用于特殊用途）；
+ 
+ count：容器的元素数量；
+ 
+ first：保存首元素，注意是首元素，不是指向首元素的指针；
+ 
+ */
+/// entsize_list_tt数据结构非常重要，方法列表、分类列表、协议列表等数据结构也是使用该模板定义。
 template <typename Element, typename List, uint32_t FlagMask>
 struct entsize_list_tt {
-    uint32_t entsizeAndFlags;
-    uint32_t count;
-    Element first;
-
+    // 顺序表模板，其中Element为元素类型，List为定义的顺序表容器类型， FlagMask指定entsizeAndFlags成员的最低多少位
+    // 可用作标志位，例如0x3表示最低两位用作标志位。
+    
+    uint32_t entsizeAndFlags; // 入口数量及Flag标志位
+    uint32_t count; // count成员是容器包含的元素数
+    Element first; // 保存首元素，注意是首元素，不是指向首元素的指针；
+    
     uint32_t entsize() const {
         return entsizeAndFlags & ~FlagMask;
     }
@@ -118,12 +139,14 @@ struct entsize_list_tt {
         return getOrEnd(i);
     }
 
+    // byteSize()返回容器占用总内存字节数
     size_t byteSize() const {
         return byteSize(entsize(), count);
     }
     
     static size_t byteSize(uint32_t entsize, uint32_t count) {
-        return sizeof(entsize_list_tt) + (count-1)*entsize;
+        // sizeOf(entsize_list_tt)返回容器的三个成员占用的字节数,具体大小取决于 Element 占用内存大小以及 Element 的对齐结构；
+        return sizeof(entsize_list_tt) + (count-1)*entsize; // count-1是因为first记录了一个元素了？？？
     }
 
     List *duplicate() const {
@@ -135,6 +158,7 @@ struct entsize_list_tt {
     }
 
     struct iterator;
+    // begin()方法返回首元素的起始地址
     const iterator begin() const { 
         return iterator(*static_cast<const List*>(this), 0); 
     }
@@ -144,6 +168,7 @@ struct entsize_list_tt {
     const iterator end() const { 
         return iterator(*static_cast<const List*>(this), count); 
     }
+    // end()方法返回容器的结束地址
     iterator end() { 
         return iterator(*static_cast<const List*>(this), count); 
     }
@@ -152,6 +177,7 @@ struct entsize_list_tt {
         uint32_t entsize;
         uint32_t index;  // keeping track of this saves a divide in operator-
         Element* element;
+        /// 一个iterator占用48个字节
 
         typedef std::random_access_iterator_tag iterator_category;
         typedef Element value_type;
@@ -160,7 +186,17 @@ struct entsize_list_tt {
         typedef Element& reference;
 
         iterator() { }
-
+        /**
+            构造函数初始化列表
+            相当于
+            terator(const List& list, uint32_t start = 0)
+            {
+                entsize = list.entsize();
+                index = list.start;
+                element = &list.getOrEnd(start);
+            }
+         */
+        /// 构造函数初始化列表
         iterator(const List& list, uint32_t start = 0)
             : entsize(list.entsize())
             , index(start)
@@ -247,13 +283,37 @@ struct ivar_t {
     const char *name; // 成员变量
     const char *type; // 成员变量的类型编码
     // alignment is sometimes -1; use alignment() instead
-    uint32_t alignment_raw;
-    uint32_t size;
+    uint32_t alignment_raw; // 成员变量的对齐准则，表示成员变量的对齐字节数为2^alignment_raw。例如，占用4字节的int类型成员变量alignment_raw为2，占用8字节的指针类型成员变量alignment_raw为3；
+    uint32_t size; // size：成员变量在对象内存空间中占用的空间大小；
 
     uint32_t alignment() const {
         if (alignment_raw == ~(uint32_t)0) return 1U << WORD_SHIFT;
         return 1 << alignment_raw;
     }
+    
+    
+    /****
+     注意：默认情况下，类的成员变量对齐方式和C语言结构体的原则是一致的。例如：继承自NSObject的SomeClass类依次包含bool、int、char、id类型的四个成员，SomeClass实例的内存图如下。注意到，bool类型的bo成员本该可以 1 bit 就可以表示但却占了4个字节的内存空间，这都是因为内存对齐原则。
+     
+                                  -----------------------------
+                                    xxxxxxxxxxx
+     x0100BB134020                -----------------------------
+                                    object id                   占用8Byte按8Byte对齐,
+     x0100BB134018                ----------------------------- 偏移24
+                                    char ch                     占用1Byte按1Byte对齐,
+     x0100BB134010                ----------------------------- 偏移16
+                                    int num                     占用4Byte按4Byte对齐,
+     x0100BB13400C                ----------------------------- 偏移12
+                                    bool bo                     占用1Byte按1Byte对齐
+     x0100BB134008                ----------------------------- 偏移8
+                                    Class isa                   占用8Byte按8Byte对齐,
+     x0100BB134000                ----------------------------- 偏移0
+                                    xxxxxxxxxxx
+                                  -----------------------------
+     
+     实际占用内存大小为: 24 + 8 = 32Byte
+     
+     ***/
 };
 
 struct property_t {
@@ -274,8 +334,10 @@ struct method_list_t : entsize_list_tt<method_t, method_list_t, 0x3> {
     }
 };
 
+ /// 类的所有成员变量保存在一个顺序表容器中，其类型为ivar_list_t结构体，代码如下。ivar_list_t继承了entsize_list_tt顺序表模板，增加了bool containsIvar(Ivar ivar) const函数，用于查找传入的Ivar类型的ivar是否包含在成员变量列表中。
 struct ivar_list_t : entsize_list_tt<ivar_t, ivar_list_t, 0> {
     bool containsIvar(Ivar ivar) const {
+        // 直接与顺序表开头地址与结尾地址比较，超出该内存区块表示不在该成员变量列表中
         return (ivar >= (Ivar)&*begin()  &&  ivar < (Ivar)&*end());
     }
 };

@@ -1741,6 +1741,7 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize)
     diff = superSize - ro->instanceStart;
 
     if (ro->ivars) {
+        // 找到类的alignment最大的成员变量
         // Find maximum alignment in this class's ivars
         uint32_t maxAlignment = 1;
         for (const auto& ivar : *ro->ivars) {
@@ -1751,10 +1752,12 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize)
         }
 
         // Compute a slide value that preserves that alignment
+        // 计算平移量
         uint32_t alignMask = maxAlignment - 1;
         diff = (diff + alignMask) & ~alignMask;
 
         // Slide all of this class's ivars en masse
+        // 成员变量布局平移
         for (const auto& ivar : *ro->ivars) {
             if (!ivar.offset) continue;  // anonymous bitfield
 
@@ -1775,13 +1778,20 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize)
     *(uint32_t *)&ro->instanceSize += diff;
 }
 
+/***
+ Non-fragile instance variables 是内存布局的一个重要特征。当一个类的继承关系确立之后（类注册到内存后），理论上成员变量的内存布局在编译时是可以固定的，也就是说类的ivar_t成员变量的offset是可以确定的。但是，固定offset带来坏处是，如果依赖框架升级，某基类的对象内存布局发生变化，譬如增加了成员变量，那么依赖于该框架基类的 APP 将不得不重新编译以更新offset。
+ Runtime 引入了 non-fragile instance variables 计数以避免以上问题。类的成员变量offset的值在编译时不固定，而是运行时根据父类的instanceSize动态调整（具体发生在 class realizing 阶段），当然这个过程是在类注册到内存之前完成的。如果依赖框架升级，某基类的对象内存布局发生变化，只要重启APP以触发重新注册依赖于该基类的扩展类，从而更新扩展类的成员变量offset完成类的 ivar layout 动态调整过程。
 
+ 
+ All instance variables in 64-bit Objective-C are non-fragile. That is, existing compiled code that uses a class's ivars will not break when the class or a superclass changes its own ivar layout. In particular, framework classes may add new ivars without breaking subclasses compiled against a previous version of the framework.（来自 runtime 源代码 Readme）
+ 
+ ***/
 static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro_t*& ro) 
 {
     class_rw_t *rw = cls->data();
 
-    assert(supercls);
-    assert(!cls->isMetaClass());
+    assert(supercls); // 不处理根类，因为没有父类就不需要调整布局
+    assert(!cls->isMetaClass());  // 不处理元类，因为没有成员变量
 
     /* debug: print them all before sliding
     if (ro->ivars) {
@@ -1796,6 +1806,7 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
     */
 
     // Non-fragile ivars - reconcile this class with its superclass
+    // Non-fragile ivars 根据父类调整类的成员变量布局
     const class_ro_t *super_ro = supercls->data()->ro;
     
     if (DebugNonFragileIvars) {
@@ -1809,7 +1820,12 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
         // Exceptions: root classes, metaclasses, *NSCF* classes, 
         // __CF* classes, NSConstantString, NSSimpleCString
         
+        // Non-fragile ivars 成员变量根据父类进行必要平移
+
+        
         // (already know it's not root because supercls != nil)
+        // 不处理以下类: *NSCF* classes, __CF* classes, NSConstantString,
+        // NSSimpleCString
         const char *clsname = cls->mangledName();
         if (!strstr(clsname, "NSCF")  &&  
             0 != strncmp(clsname, "__CF", 4)  &&  
@@ -1822,6 +1838,7 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
             
             // Find max ivar alignment in class.
             // default to word size to simplify ivar update
+            // 找到类的alignment最大的成员变量，默认使用系统WORD字节数
             uint32_t alignment = 1<<WORD_SHIFT;
             if (ro->ivars) {
                 for (const auto& ivar : *ro->ivars) {
@@ -1853,11 +1870,15 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
 
     if (ro->instanceStart >= super_ro->instanceSize) {
         // Superclass has not overgrown its space. We're done here.
+        // 扩展后的父类`instanceSize`，没有超过原先的`instanceSize`
         return;
     }
     // fixme can optimize for "class has no new ivars", etc
 
     if (ro->instanceStart < super_ro->instanceSize) {
+        // 扩展后的父类`instanceSize`，超过原先的`instanceSize`，则成员变量
+        // 布局必须整体平移
+
         // Superclass has changed size. This class's ivars must move.
         // Also slide layout bits in parallel.
         // This code is incapable of compacting the subclass to 
@@ -1868,10 +1889,10 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
                          cls->nameForLogging(), ro->instanceStart, 
                          super_ro->instanceSize);
         }
-        class_ro_t *ro_w = make_ro_writeable(rw);
+        class_ro_t *ro_w = make_ro_writeable(rw); // 将ro置为可读写
         ro = rw->ro;
-        moveIvars(ro_w, super_ro->instanceSize);
-        gdb_objc_class_changed(cls, OBJC_CLASS_IVARS_CHANGED, ro->name);
+        moveIvars(ro_w, super_ro->instanceSize); // 平移成员变量布局
+        gdb_objc_class_changed(cls, OBJC_CLASS_IVARS_CHANGED, ro->name); // 类变更事件，忽略
     } 
 }
 
@@ -2005,10 +2026,10 @@ static Class realizeClass(Class cls)
     cls->superclass = supercls;
     cls->initClassIsa(metacls);
 
-    // Reconcile instance variable offsets / layout.
+    // Reconcile(调和) instance variable offsets / layout.
     // This may reallocate class_ro_t, updating our ro variable.
 
-    // 调整ivarLayout
+    // 调整ivarLayout --- 类的成员变量内存布局调整 non-fragile instance variables技术
     if (supercls  &&  !isMeta) reconcileInstanceVariables(cls, supercls, ro);
 
     // Set fastInstanceSize if it wasn't set already.
