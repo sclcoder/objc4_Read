@@ -6148,7 +6148,9 @@ class_replaceMethodsBulk(Class cls, const SEL *names, const IMP *imps,
 * Adds an ivar to a class.
 * Locking: acquires runtimeLock
 **********************************************************************/
-BOOL 
+
+// 添加成员变量
+BOOL
 class_addIvar(Class cls, const char *name, size_t size, 
               uint8_t alignment, const char *type)
 {
@@ -6163,11 +6165,19 @@ class_addIvar(Class cls, const char *name, size_t size,
     assert(cls->isRealized());
 
     // No class variables
+    // 元类不存在成员变量
     if (cls->isMetaClass()) {
         return NO;
     }
+    
+//    // class allocated but not yet registered
+//    #define RW_CONSTRUCTING       (1<<26)
+//    // class allocated and registered
+//    #define RW_CONSTRUCTED        (1<<25)
+
 
     // Can only add ivars to in-construction classes.
+    // 仅在正在构建阶段的类才可以添加成员变量
     if (!(cls->data()->flags & RW_CONSTRUCTING)) {
         return NO;
     }
@@ -6175,29 +6185,35 @@ class_addIvar(Class cls, const char *name, size_t size,
     // Check for existing ivar with this name, unless it's anonymous.
     // Check for too-big ivar.
     // fixme check for superclass ivar too?
+    // 匿名或不存在的成员变量才可添加。注意：不支持沿继承链搜索
     if ((name  &&  getIvar(cls, name))  ||  size > UINT32_MAX) {
         return NO;
     }
-
+    
+    // Reallocates rw->ro if necessary to make it writeable.
     class_ro_t *ro_w = make_ro_writeable(cls->data());
 
     // fixme allocate less memory here
     
     ivar_list_t *oldlist, *newlist;
     if ((oldlist = (ivar_list_t *)cls->data()->ro->ivars)) {
+        // 成员变量列表不为空，分配新成员变量列表内存，大小为旧成员变量列表占用空间加上单个元素占用空间
         size_t oldsize = oldlist->byteSize();
         newlist = (ivar_list_t *)calloc(oldsize + oldlist->entsize(), 1);
         memcpy(newlist, oldlist, oldsize);
         free(oldlist);
     } else {
+        // 成员变量列表为空，直接分配ivar_list_t结构体占用空间的内存（只有首元素）
         newlist = (ivar_list_t *)calloc(sizeof(ivar_list_t), 1);
-        newlist->entsizeAndFlags = (uint32_t)sizeof(ivar_t);
+        newlist->entsizeAndFlags = (uint32_t)sizeof(ivar_t); // 设置 entsizeAndFlags
     }
 
+    // 计算新增的成员变量在成员变量列表容器内存空间的偏移量
     uint32_t offset = cls->unalignedInstanceSize();
     uint32_t alignMask = (1<<alignment)-1;
-    offset = (offset + alignMask) & ~alignMask;
+    offset = (offset + alignMask) & ~alignMask; // 设置对齐
 
+    // 获取保存新增成员变量的内存空间起始地址
     ivar_t& ivar = newlist->get(newlist->count++);
 #if __x86_64__
     // Deliberately over-allocate the ivar offset variable. 
@@ -6206,12 +6222,14 @@ class_addIvar(Class cls, const char *name, size_t size,
 #else
     ivar.offset = (int32_t *)malloc(sizeof(int32_t));
 #endif
+    // 更新新增成员变量的偏移量
     *ivar.offset = offset;
     ivar.name = name ? strdupIfMutable(name) : nil;
     ivar.type = strdupIfMutable(type);
     ivar.alignment_raw = alignment;
     ivar.size = (uint32_t)size;
-
+    
+    // 成员变量列表指向新成员变量列表
     ro_w->ivars = newlist;
     cls->setInstanceSize((uint32_t)(offset + size));
 

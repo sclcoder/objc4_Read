@@ -552,6 +552,8 @@ _object_getIvarLayout(Class _Nullable cls, id _Nullable object)
   "Strong" includes ARC __strong ivars
   "Weak" includes ARC and new MRC __weak ivars
   "Unretained" includes ARC __unsafe_unretained and old GC+MRC __weak ivars
+ 
+  成员变量的内存管理方式，包括：未知/strong/weak/assign。
 */
 typedef enum {
     objc_ivar_memoryUnknown,     // unknown / unknown

@@ -267,6 +267,16 @@ static bool isScanned(ptrdiff_t ivar_offset, const uint8_t *layout)
 * - its offset
 * - its memory management behavior
 * The ivar is assumed to be word-aligned and of of object type.
+ 
+ 
+ 
+ 查询成员变量信息ivarLayout和weakIvarLayout可以体现在_class_lookUpIvar(...)函数代码中，
+ _class_lookUpIvar(...)用于查询目标成员变量偏移量offset和内存管理方式。
+ 
+ ivarLayout和weakIvarLayout用于判断成员变量的内存管理方式。ivarLayout中标记为scan的成员变量的内存管理方式为strong；weakIvarLayout中标记为scan的成员变量的内存管理方式为weak。
+
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da2a0f2e51d45780e4cea1c
 **********************************************************************/
 static void 
 _class_lookUpIvar(Class cls, Ivar ivar, ptrdiff_t& ivarOffset, 
@@ -278,6 +288,8 @@ _class_lookUpIvar(Class cls, Ivar ivar, ptrdiff_t& ivarOffset,
 
     // Preflight the hasAutomaticIvars check
     // because _class_getClassForIvar() may need to take locks.
+    
+    // 查找 ARC variables and ARC-style weak.
     bool hasAutomaticIvars = NO;
     for (Class c = cls; c; c = c->superclass) {
         if (c->hasAutomaticIvars()) {
@@ -287,25 +299,31 @@ _class_lookUpIvar(Class cls, Ivar ivar, ptrdiff_t& ivarOffset,
     }
 
     if (hasAutomaticIvars) {
+        
         Class ivarCls = _class_getClassForIvar(cls, ivar);
+        
         if (ivarCls->hasAutomaticIvars()) {
             // ARC layout bitmaps encode the class's own ivars only.
             // Use alignedInstanceStart() because unaligned bytes at the start
             // of this class's ivars are not represented in the layout bitmap.
+            
             ptrdiff_t localOffset = 
                 ivarOffset - ivarCls->alignedInstanceStart();
-
+            
+            // 判断ivarLayout中成员变量offset对应的WORD是否保存id类型
             if (isScanned(localOffset, class_getIvarLayout(ivarCls))) {
                 memoryManagement = objc_ivar_memoryStrong;
                 return;
             }
             
+            // 判断weakIvarLayout中成员变量offset对应的WORD是否保存id类型
             if (isScanned(localOffset, class_getWeakIvarLayout(ivarCls))) {
                 memoryManagement = objc_ivar_memoryWeak;
                 return;
             }
 
             // Unretained is only for true ARC classes.
+            // assign仅在ARC下才有效
             if (ivarCls->isARC()) {
                 memoryManagement = objc_ivar_memoryUnretained;
                 return;
@@ -365,19 +383,32 @@ void object_setIvarWithStrongDefault(id obj, Ivar ivar, id value)
 {
     return _object_setIvar(obj, ivar, value, true /*strong default*/);
 }
+/**
+获取对象成员变量的值
+ 构建类的实例时，按照成员变量列表分配内存空间，在访问实例的成员变量的值时，实例的类的成员变量列表起到至关重要的作用。调用object_getIvar(id obj, Ivar ivar)函数获取对象的成员变量。
+ 
+ 获取对象成员变量的值的大致流程是：
 
-
+ 根据对象isa指针获取对象的类；从类的成员变量列表中查询该成员变量的偏移量offset；成员变量的值的地址 = 对象的起始地址 + 偏移量；
+ 
+ 代码中，首先调用_class_lookUpIvar(...)查询成员变量信息，返回成员变量的偏移量offset和内存管理方式memoryManagement用于判断成员变量是否为weak类型；
+ 判断成员变量为 weak 时，调用id objc_loadWeak(id *location)获取成员变量的值，之所以这样处理是因为需要将返回的弱引用所指向的对象添加到 Autorelease Pool 中以保证对象能在弱引用的作用域内维持而不被立即释放。
+ 
+ */
 id object_getIvar(id obj, Ivar ivar)
 {
     if (!obj  ||  !ivar  ||  obj->isTaggedPointer()) return nil;
 
     ptrdiff_t offset;
     objc_ivar_memory_management_t memoryManagement;
+    //  根据对象isa指针获取对象的类；成员变量的偏移量offset和内存管理方式memoryManagement
     _class_lookUpIvar(obj->ISA(), ivar, offset, memoryManagement);
-
+    
+    // 成员变量的值的地址 = 对象的起始地址 + 偏移量；
     id *location = (id *)((char *)obj + offset);
 
     if (memoryManagement == objc_ivar_memoryWeak) {
+        // 将返回的弱引用所指向的对象添加到 Autorelease Pool 中以保证对象能在弱引用的作用域内维持而不被立即释放
         return objc_loadWeak(location);
     } else {
         return *location;

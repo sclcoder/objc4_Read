@@ -102,7 +102,7 @@ typedef struct classref * classref_t;
  entsize_list_tt<typename Element, typename List, uint32_t FlagMask>模板中，Element表示元素的类型，List表示所定义的顺序表容器类型名称，
  FlagMask用于从entsize_list_tt的entsizeAndFlags获取目标数据（Flag标志 或者 元素占用空间大小）。
  
- 既然entsize_list_tt是顺序表，那么所占用内存空间必然是连续分配的。由于每个元素都是同类型，占用相同大小的内存空间，因此可以通过索引值及首元素地址来定位到具体元素的内存地址。
+ 既然entsize_list_tt是顺序表，那么所占用内存空间必然是连续分配的。由于每个元素都是同类型，占用相同大小的内存空间(比如存储成员变量的列表，存储的元素是IVar结构)，因此可以通过索引值及首元素地址来定位到具体元素的内存地址。
  
  entsize_list_tt包含三个成员：
 
@@ -113,7 +113,8 @@ typedef struct classref * classref_t;
  first：保存首元素，注意是首元素，不是指向首元素的指针；
  
  */
-/// entsize_list_tt数据结构非常重要，方法列表、分类列表、协议列表等数据结构也是使用该模板定义。
+/// entsize_list_tt数据结构非常重要，成员变量列表、方法列表、分类列表、协议列表等数据结构是使用该模板定义。
+
 template <typename Element, typename List, uint32_t FlagMask>
 struct entsize_list_tt {
     // 顺序表模板，其中Element为元素类型，List为定义的顺序表容器类型， FlagMask指定entsizeAndFlags成员的最低多少位
@@ -683,6 +684,20 @@ struct class_ro_t {
      class_ro_t结构体中包含ivarLayout、weakIvarLayout成员，用于标记对象占用的内存空间中，哪些 WORD 有被用来存储id类型的成员变量，weakIvarLayout专门针对weak类型成员变量。
      
      ivarLayout、weakIvarLayout可以理解为狭义上的成员变量布局。objc_class用十六进制数表示类的 ivar layout，该十六进制数是通过压缩二进制 layout bitmap 获得。例如，调用class_getIvarLayout获取UIView的ivarLayout为0x0312119A12。
+     
+     
+     
+     
+     成员变量记录了成员变量的变量名，还记录了成员变量在对象内存空间中的偏移量、成员变量数据类型、占用字节数以及对齐字节数，用ivarLayout、weakIvarLayout记录成员变量的内存管理方式；
+
+     新版本 runtime 支持 non-fragile instance variables，成员变量的偏移量并不是编译时固定，而是在运行时根据父类的instanceSize动态调整；
+     ivarLayout、weakIvarLayout数据形式时十六进制数，是对layout_bitmap中bits保存的二进制数压缩处理后的结果，layout_bitmap保存的二进制数记录了类对象内存空间中的instanceStart起始的类的成员变量内存空间中哪个 WORD 保存了id类型成员变量；
+
+     ivarLayout、weakIvarLayout记录了某 WORD 保存id，则二进制该位置为1，
+     称该对象中该成员变量scanned，ivarLayout中标记了scanned的成员变量内存管理方式为strong，weakIvarLayout中标记了scanned的成员变量内存管理方式为weak。
+
+     作者：Luminix
+     链接：https://juejin.im/post/5da2a0f2e51d45780e4cea1c
      */
     const uint8_t * ivarLayout; /// 成员变量的内存布局
     
