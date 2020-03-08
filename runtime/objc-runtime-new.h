@@ -676,8 +676,14 @@ struct class_ro_t {
 #ifdef __LP64__
     uint32_t reserved;
 #endif
-
-    // 成员变量内存布局，标记实例占用的内存空间中哪些WORD保存了成员变量数据；
+    
+    /**
+     成员变量内存布局，标记实例占用的内存空间中哪些WORD保存了成员变量数据，具体需要查看objc-layout.mm文件中的layout_bitmap信息
+     
+     class_ro_t结构体中包含ivarLayout、weakIvarLayout成员，用于标记对象占用的内存空间中，哪些 WORD 有被用来存储id类型的成员变量，weakIvarLayout专门针对weak类型成员变量。
+     
+     ivarLayout、weakIvarLayout可以理解为狭义上的成员变量布局。objc_class用十六进制数表示类的 ivar layout，该十六进制数是通过压缩二进制 layout bitmap 获得。例如，调用class_getIvarLayout获取UIView的ivarLayout为0x0312119A12。
+     */
     const uint8_t * ivarLayout; /// 成员变量的内存布局
     
     const char * name; // 类名

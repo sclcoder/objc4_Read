@@ -48,13 +48,87 @@
 *       skip 3 - 15 references (32-88)
 *       no skip - 10 references (92-128)
 *       end
-* 
+ 
+  
+  一下解释来自: https://juejin.im/post/5da2a0f2e51d45780e4cea1c#heading-4
+  Runtime中用layout_bitmap结构体表示压缩前的ivarLayout，保存的是一个二进制数，
+  二进制数每一位标记类的成员变量空间（instanceStart为起始instanceSize大小的内存空间）中，对应位置的 WORD  是否存储了id类型成员变量。例如，二进制数0101表示成员第二个、第四个成员变量是id类型
+  
+ 
+  某个对象占用的内存空间: 数据1-4表示使用的空间 空白区域表示未使用的空间
+                 在内存地址偏移量为 4-8 12-16 16-20 32-132处保存有数据
+                 根据构建规则构建layout bitmap的bits,bits的有效位数为 132/4 = 33位，需要分配 33/8 = 5个字节。因此最高7位为无效位
+  
+ 如下32位机器（WORD为4个字节）中某个对象占用的内存空间 注意此处的地址以WORD为单位
+ 
+                 ----------------------------------------
+                    xxxxxxxxxx 其他 xxxxxxxxxx
+  0x100BB134084  ----------------------------------------
+                        数据4
+  0x100BB134020  ----------------------------------------
+ 
+  0x100BB134014  ----------------------------------------
+                        数据3
+  0x100BB134010  ----------------------------------------
+                        数据2
+  0x100BB13400C  ----------------------------------------
+ 
+  0x100BB134008  ----------------------------------------
+                        数据1
+  0x100BB134004  ----------------------------------------
+                    
+  0x100BB134000  ----------------------------------------
+                    xxxxxxxxxx 其他 xxxxxxxxxx
+                 ----------------------------------------
+ 
+  compress_layout算法
+
+  步骤一、 分配layout bitmap的5个字节空间如下 高7位无效
+ 
+          xxxxxxx0 00000000 00000000 00000000  00000000
+  
+  步骤二、根据成员变量列表构建bits
+ 
+        由于在4-8保存了数据，因此实例内存空间的第2个WORD被使用，于是将bits的第2个位置置为1
+          xxxxxxx0 00000000 00000000 00000000  00000010
+         
+        由于在12-16保存了数据，因此实例内存空间的第4个WORD被使用，于是将bits的第4个位置置为1
+          xxxxxxx0 00000000 00000000 00000000  00001010
+        
+        由于在16-20保存了数据，因此实例内存空间的第5个WORD被使用，于是将bits的第4个位置置为1
+          xxxxxxx0 00000000 00000000 00000000  00011010
+        
+        同理
+          xxxxxxx0 11111111 11111111 11111111  00011010
+ 
+  步骤三、
+        压缩layout bitmap第一次迭代,找到第一摞来续的0第一摞连续的1。连续0个数为1即 skip=1, 连续1个数为1即 scan=1 因此第一次迭代得到 0x11
+ 
+        压缩layout bitmap第二次迭代,找到第一摞来续的0第一摞连续的1。连续0个数为1即 skip=1, 连续1个数为2即 scan=2 因此第一次迭代得到 0x12
+        
+        压缩layout bitmap第三次迭代,找到第一摞来续的0第一摞连续的1。连续0个数为3即 skip=3。 注意因为skip和scan都使用4bit表示，所以值不能大于15，当skip或scan大于15时本次迭代必须结束，因此本次迭代scan=15,得到 0x3f
+  
+        压缩layout bitmap第四次迭代,找到第一摞来续的0第一摞连续的1。连续0个数为0即 skip=0。连续1个数为10即 scan=10 因此第一次迭代得到 0x0a
+ 
+ 步骤四、
+        综合每次迭代结果依次串联，并以0x00结尾，得到iVarLayout为{0x11 0x12 0x3f 0x0a 0x00}
+        
+        ---------------------------------
+        |        IvarLayout             |            |
+        |                               |
+        |    0x11 0x12 0x3f 0x0a 0x00   |
+        |                               |
+        ---------------------------------
+ 
 **********************************************************************/
 
 
 /**********************************************************************
 * compress_layout
 * Allocates and returns a compressed string matching the given layout bitmap.
+ 
+ 类的ivarLayout是layout_bitmap压缩后得到的十六进制数，layout_bitmap压缩调用compress_layout(...)实现。
+ 其中bits参数指向保存layout_bitmap的内存；bitmap_bits参数为二进制数的位数；weak参数表示bits数据是否为weakIvarLayout。
 **********************************************************************/
 static unsigned char *
 compress_layout(const uint8_t *bits, size_t bitmap_bits, bool weak)
@@ -64,6 +138,7 @@ compress_layout(const uint8_t *bits, size_t bitmap_bits, bool weak)
     unsigned char *result;
 
     // overallocate a lot; reallocate at correct size later
+    // 多分配些额外的位
     unsigned char * const layout = (unsigned char *)
         calloc(bitmap_bits + 1, 1);
     unsigned char *l = layout;
@@ -75,6 +150,7 @@ compress_layout(const uint8_t *bits, size_t bitmap_bits, bool weak)
 
         // Count one range each of skip and scan.
         while (i < bitmap_bits) {
+            // skip为本次循环二进制数连续的0位数，scan为连续的1位数
             uint8_t bit = (uint8_t)((bits[i/8] >> (i % 8)) & 1);
             if (bit) break;
             i++;
@@ -89,6 +165,7 @@ compress_layout(const uint8_t *bits, size_t bitmap_bits, bool weak)
         }
 
         // Record skip and scan
+        // skip和scan的值均不能超过15，超过15则立即进行分割
         if (skip) all_set = NO;
         if (scan) none_set = NO;
         while (skip > 0xf) {
@@ -107,6 +184,7 @@ compress_layout(const uint8_t *bits, size_t bitmap_bits, bool weak)
     }
     
     // insert terminating byte
+     // 插入终止字节
     *l++ = '\0';
     
     // return result
@@ -189,7 +267,13 @@ static void move_bits(layout_bitmap bits, size_t src, size_t dst,
 } }
 #endif
 
+/**
+ 调用decompress_layout(...)解压缩ivarLayout，为压缩的逆过程。例如，增加成员变量时需要更新ivarLayout，此时需要先解压ivarLayout的十六进制数得到layout_bitmap，然后更新layout_bitmap数据，最后压缩layout_bitmap得到十六进制数保存到ivarLayout。
 
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da2a0f2e51d45780e4cea1c
+ 来源：掘金
+ */
 static void decompress_layout(const unsigned char *layout_string, layout_bitmap bits)
 {
     unsigned char c;
@@ -292,7 +376,10 @@ layout_string_create(layout_bitmap bits)
     return result;
 }
 
-
+/**
+    设置成员变量对应的ivarLayout、weakIvarLayout位调用layout_bitmap_set_ivar(...)函数。
+    其中bits参数为类的当前ivarLayout或weakIvarLayout；type参数成员变量的类型编码；offset为成员变量的offset。
+ */
 void
 layout_bitmap_set_ivar(layout_bitmap bits, const char *type, size_t offset)
 {

@@ -705,13 +705,19 @@ extern id objc_autoreleaseReturnValue(id obj);
 // block trampolines
 extern IMP _imp_implementationWithBlockNoCopy(id block);
 
+/**
+ Runtime 中用layout_bitmap结构体表示压缩前的ivarLayout，保存的是一个二进制数，
+ 二进制数每一位标记类的成员变量空间（instanceStart为起始instanceSize大小的内存空间）中，对应位置的 WORD 是否存储了id类型成员变量。
+    例如，二进制数0101表示成员第二个、第四个成员变量是id类型。layout_bitmap包含以下成员：
+ */
 // layout.h
 typedef struct {
-    uint8_t *bits;
-    size_t bitCount;
-    size_t bitsAllocated;
-    bool weak;
+    uint8_t *bits; // 用uint8_t指针bits指向二进制数首地址；
+    size_t bitCount; // 二进制数未必完全占满bitsAllocated大小的内存空间，因此用bitCount记录，内存空间中的有效位数；
+    size_t bitsAllocated; // 表示用于保存该二进制数而分配的内存空间大小，单位bit，由于按字节读取，因此bitsAllocated必定是8的倍数；
+    bool weak;  // 标记是否用于描述weakIvarLayout；
 } layout_bitmap;
+
 extern layout_bitmap layout_bitmap_create(const unsigned char *layout_string, size_t layoutStringInstanceSize, size_t instanceSize, bool weak);
 extern layout_bitmap layout_bitmap_create_empty(size_t instanceSize, bool weak);
 extern void layout_bitmap_free(layout_bitmap bits);
