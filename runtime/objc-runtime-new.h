@@ -120,15 +120,15 @@ struct entsize_list_tt {
     // 顺序表模板，其中Element为元素类型，List为定义的顺序表容器类型， FlagMask指定entsizeAndFlags成员的最低多少位
     // 可用作标志位，例如0x3表示最低两位用作标志位。
     
-    uint32_t entsizeAndFlags; // 入口数量及Flag标志位
+    uint32_t entsizeAndFlags; // 元素占用空间大小及Flag标志位
     uint32_t count; // count成员是容器包含的元素数
     Element first; // 保存首元素，注意是首元素，不是指向首元素的指针；
     
-    uint32_t entsize() const {
-        return entsizeAndFlags & ~FlagMask;
+    uint32_t entsize() const { // 元素占用空间大小
+        return entsizeAndFlags & ~FlagMask; // 假如FlagMask为0x03 那么就是将最低两位置0来获取entsize
     }
     uint32_t flags() const {
-        return entsizeAndFlags & FlagMask;
+        return entsizeAndFlags & FlagMask; // // 假如FlagMask为0x03 那么就是将最低两位置1来获取flags
     }
 
     Element& getOrEnd(uint32_t i) const { 
@@ -1069,16 +1069,52 @@ class method_array_t :
 {
     typedef list_array_tt<method_t, method_list_t> Super;
 
+    
+    
+ /**
+  由method_array_t中扩展list_array_tt的方法的方法名可见，method_array_t是为 category 量身定做的，显然 category 中定义的所有方法都存储在该容器中，每个 category 定义的方法对应method_array_t二维数组容器中的一个元素，也就是一个方法列表method_list_t结构体的指针。扩展的方法如下：
+
+  beginCategoryMethodLists()：指向容器的第一个数组；
+  
+  endCategoryMethodLists(Class cls)：当类的class_rw_t中不存在baseMethodList时，直接返回容器最后一个数组，
+  当存在baseMethodList时，返回容器的倒数第二个数组。
+
+  作者：Luminix
+  链接：https://juejin.im/post/5da4740651882535b7242eaa
+  */
  public:
     method_list_t **beginCategoryMethodLists() {
         return beginLists(); /// 返回指向容器的第一个方法列表地址，这个地址存放的内容是一个method_list_t指针的地址
     }
     
+    // 当类的class_rw_t中不存在baseMethodList时，直接返回容器最后一个数组，当存在baseMethodList时，返回容器的倒数第二个数组。
     method_list_t **endCategoryMethodLists(Class cls);
 
     method_array_t duplicate() {
         return Super::duplicate<method_array_t>();
     }
+    
+    /****
+     
+     在类的加载过程。从 class realizing 时调用的methodizeClass(...)函数的处理逻辑可以看出：
+     
+     class_rw_t中的method_array_t容器保存了类的完整方法列表，包括静态编译的类的基本方法、运行时决议的 category 中的方法以及运行时动态添加的方法。
+     而且class_rw_t中method_array_t容器的最后一个数组实际上就是class_ro_t的baseMethodList。
+     再结合 介绍的list_array_tt的attachLists(...)方法逻辑，可以基本了解方法列表容器的工作机制。
+     
+     当使用class_addMethod(...)动态添加类，或者应用加载阶段加载 category 时，均调用了该方法。由于attachLists(...)添加方法时，将方法添加到容器的开头，
+     将原有的method_list_t集体后移，因此类的同名方法的IMP的优先级从高到低排序如下：
+
+     通过class_addMethod(...)动态添加的方法；
+     后编译的类的 category 中的方法；
+     先编译的类的 category 中的方法；
+     类实现的方法；
+     类的父类实现的方法；
+
+     作者：Luminix
+     链接：https://juejin.im/post/5da4740651882535b7242eaa
+     
+     */
 };
 
 

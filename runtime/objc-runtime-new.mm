@@ -847,7 +847,7 @@ static void methodizeClass(Class cls)
     method_list_t *list = ro->baseMethods();
     if (list) {
         prepareMethodLists(cls, &list, 1, YES, isBundleClass(cls));
-        rw->methods.attachLists(&list, 1);
+        rw->methods.attachLists(&list, 1); /// 注意是attach并不是覆盖替换方法
     }
     // 将ro中的属性列表添加到rw的属性列表中
     property_list_t *proplist = ro->baseProperties;
