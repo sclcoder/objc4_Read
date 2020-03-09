@@ -83,9 +83,9 @@ public:
     static size_t bytesForCapacity(uint32_t cap);
     static struct bucket_t * endMarker(struct bucket_t *b, uint32_t cap);
 
-    void expand();
-    void reallocate(mask_t oldCapacity, mask_t newCapacity);
-    struct bucket_t * find(cache_key_t key, id receiver);
+    void expand(); // 缓存扩容
+    void reallocate(mask_t oldCapacity, mask_t newCapacity); // 重新分配空间
+    struct bucket_t * find(cache_key_t key, id receiver); // 查找
 
     static void bad_cache(id receiver, SEL sel, Class isa) __attribute__((noreturn));
 };

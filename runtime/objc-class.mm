@@ -607,10 +607,12 @@ void fixupCopiedIvars(id newObject, id oldObject)
 * cls should be a metaclass.
 * Does not check if the method already exists.
 **********************************************************************/
+
+// 动态解析类方法
 static void _class_resolveClassMethod(Class cls, SEL sel, id inst)
 {
     assert(cls->isMetaClass());
-
+    // 若类未实现resolveClassMethod方法，则不走方法动态解析流程
     if (! lookUpImpOrNil(cls, SEL_resolveClassMethod, inst, 
                          NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
     {
@@ -619,11 +621,16 @@ static void _class_resolveClassMethod(Class cls, SEL sel, id inst)
     }
 
     BOOL (*msg)(Class, SEL, SEL) = (typeof(msg))objc_msgSend;
+    
+    // 触发方法动态解析流程  msg()即调用resolveClassMethod方法，在该resolveClassMethod方法中调用class_addMethod动态添加sel的IMP
     bool resolved = msg(_class_getNonMetaClass(cls, inst), 
                         SEL_resolveClassMethod, sel);
 
     // Cache the result (good or bad) so the resolver doesn't fire next time.
     // +resolveClassMethod adds to self->ISA() a.k.a. cls
+    
+    // lookUpImpOrNil触发将动态解析的SEL与IMP的映射添加到类的方法缓存
+    // 这样下次调用SEL时可直接从cache_t中查询到IMP
     IMP imp = lookUpImpOrNil(cls, sel, inst, 
                              NO/*initialize*/, YES/*cache*/, NO/*resolver*/);
 
@@ -652,8 +659,11 @@ static void _class_resolveClassMethod(Class cls, SEL sel, id inst)
 * cls may be a metaclass or a non-meta class.
 * Does not check if the method already exists.
 **********************************************************************/
+
+// 动态解析实例方法
 static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
 {
+    // 若类未实现resolveInstanceMethod方法，则不走方法动态解析流程
     if (! lookUpImpOrNil(cls->ISA(), SEL_resolveInstanceMethod, cls, 
                          NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
     {
@@ -662,10 +672,19 @@ static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
     }
 
     BOOL (*msg)(Class, SEL, SEL) = (typeof(msg))objc_msgSend;
+    
+    // 触发方法动态解析流程 : msg()即调用resolveInstanceMethod方法，在该resolveInstanceMethod方法中调用class_addMethod动态添加sel的IMP
     bool resolved = msg(cls, SEL_resolveInstanceMethod, sel);
 
     // Cache the result (good or bad) so the resolver doesn't fire next time.
     // +resolveInstanceMethod adds to self a.k.a. cls
+    
+    /**
+      如果在resolveInstanceMethod方法中动态添加了对应SEL的IMP,再次走lookUpImpOrNil流程,在这次流程中会在方法列表中找到IMP。
+      同时会加载到cache_t缓存中,这样下次调用SEL时可直接从cache_t中查询到IMP
+      
+     注意: 再次调用 lookUpImpOrNil(...); 时 resolver 设置为 NO,保证动态解析只走一次。 因为会有这样的场景: 只实现了resolveInstanceMethod方法并返回YES,但是并没有在该方法中动态添加IMP。此时设置resolver=NO可以避免死循环,从而走消息转发逻辑。
+     */
     IMP imp = lookUpImpOrNil(cls, sel, inst, 
                              NO/*initialize*/, YES/*cache*/, NO/*resolver*/);
 
@@ -694,19 +713,27 @@ static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
 * Returns nothing; any result would be potentially out-of-date already.
 * Does not check if the method already exists.
 **********************************************************************/
+
+// 动态解析方法
 void _class_resolveMethod(Class cls, SEL sel, id inst)
 {
     if (! cls->isMetaClass()) {
         // try [cls resolveInstanceMethod:sel]
+        // 动态解析实例方法
         _class_resolveInstanceMethod(cls, sel, inst);
     } 
     else {
         // try [nonMetaClass resolveClassMethod:sel]
         // and [cls resolveInstanceMethod:sel]
+        
+        // 动态解析类方法
         _class_resolveClassMethod(cls, sel, inst);
+        
+        // 这里为什么要给元类再动态解析实例方法
         if (!lookUpImpOrNil(cls, sel, inst, 
                             NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
         {
+            
             _class_resolveInstanceMethod(cls, sel, inst);
         }
     }
@@ -817,6 +844,7 @@ IMP class_getMethodImplementation(Class cls, SEL sel)
                          YES/*initialize*/, YES/*cache*/, YES/*resolver*/);
 
     // Translate forwarding function to C-callable external version
+    // 继承链无该SEL对应的IMP，则从消息转发流程中搜索IMP
     if (!imp) {
         return _objc_msgForward;
     }

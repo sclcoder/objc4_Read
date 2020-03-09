@@ -4967,7 +4967,7 @@ class_setVersion(Class cls, int version)
     cls->data()->version = version;
 }
 
-
+// 用二分查找从已排序的method_list_t中搜索方法名为key的方法
 static method_t *findMethodInSortedMethodList(SEL key, const method_list_t *list)
 {
     assert(list);
@@ -5007,15 +5007,21 @@ static method_t *findMethodInSortedMethodList(SEL key, const method_list_t *list
 * fixme
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+
+// 简单线性遍历method_list_t搜索方法名为sel的方法，查到立刻返回
 static method_t *search_method_list(const method_list_t *mlist, SEL sel)
 {
     int methodListIsFixedUp = mlist->isFixedUp();
     int methodListHasExpectedSize = mlist->entsize() == sizeof(method_t);
     
     if (__builtin_expect(methodListIsFixedUp && methodListHasExpectedSize, 1)) {
+        
+        //对于isFixedUp的方法列表用二分法搜索，这也是fixedUp时需要对方法列表排序的原因
         return findMethodInSortedMethodList(sel, mlist);
+        
     } else {
         // Linear search of unsorted method list
+        // 线性搜索，简单遍历
         for (auto& meth : *mlist) {
             if (meth.name == sel) return &meth;
         }
@@ -5035,6 +5041,7 @@ static method_t *search_method_list(const method_list_t *mlist, SEL sel)
     return nil;
 }
 
+// 当前类的方法列表中搜索方法
 static method_t *
 getMethodNoSuper_nolock(Class cls, SEL sel)
 {
@@ -5166,16 +5173,64 @@ IMP _class_lookupMethodAndLoadCache3(id obj, SEL sel, Class cls)
 *   must be converted to _objc_msgForward or _objc_msgForward_stret.
 *   If you don't want forwarding at all, use lookUpImpOrNil() instead.
 **********************************************************************/
+
+/**
+Runtime预定义的统一的触发方法动态解析的SEL，注意实际值应该并不是NULL
+ SEL SEL_resolveInstanceMethod = NULL;
+
+Runtime预定义的标记进入消息转发流程的IMP
+extern void _objc_msgForward_impcache(void);
+
+从cls类的`cache_t`方法缓存哈希表中查询SEL对应的IMP
+extern IMP cache_getImp(Class cls, SEL sel);
+ 
+ 
+ 1.在类的方法缓冲中搜索方法，搜索到则立刻返回；
+ 
+ 2.判断类是否已完成 class realizing，若未完成，则先进行 class realizing，因为在class realizing 完成之前，类的class_rw_t中的方法列表都有可能是不完整的；
+ 
+ 3.若类未初始化，则先执行类的initialize()方法，因为其中可能包含动态添加方法逻辑；
+ 
+ 4.再次在类的方法缓冲中搜索方法，搜索到则立刻返回，因为都可能触发方法缓冲更新；
+ 
+ 5.遍历类的method_array_t方法列表二维数组容器中的所有method_list_t，在method_list_t中搜索方法。若method_list_t已排序，
+ 
+ 则使用二分法搜索，若method_list_t未排序，则用简单线性搜索。搜索到则立刻返回；
+ 
+ 6.沿着继承链在父类中递归地搜索方法。搜索到则立刻返回；
+ 
+ 7.尝试方法动态解析（在 3.1 中详细介绍），若返回true，则回到第4步再次尝试搜索；
+ 
+ 8.若方法动态解析返回false，则触发消息转发流程。返回_objc_msgForward_impcache，返回该IMP表示需要进入消息转发流程；
+
+
+ 注意：
+ initialize()方法和load()方法的作用有点相似，都是用于类的初始化。
+ 但两者在行为上有很大区别：
+ 
+ 1、load()方法不具有继承特性，继承链上的所有类定义的所有load()方法均会被调用，load()方法中禁止使用super关键字；
+    intialize()具有继承特性，可使用super关键字，其行为相当于普通的类方法。 (slc:该方法不用主动调用, runtime中会自动先调用super的initialize)
+ 
+ 2、load()方法在类加载时触发，且 runtime 严格控制一个类的load()方法只会被执行一次；
+    initialize()方法 在第一次调用类的方法时，在lookUpImpOrForward(...)中检查类是否初始化时触发，因此若父类实现了initialize()方法，
+ 但是其所有子类均未实现，则无论是第一次调用子类还是父类的方法，都会触发父类的initialize()方法。
+
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da4740651882535b7242eaa
+ */
+
 IMP lookUpImpOrForward(Class cls, SEL sel, id inst, 
                        bool initialize, bool cache, bool resolver)
 {
     IMP imp = nil;
-    bool triedResolver = NO;
-
+    bool triedResolver = NO; // 是否已经过动态解析
+    
     runtimeLock.assertUnlocked();
-
+    
+    // 1.一般的消息查找
     // Optimistic cache lookup
     if (cache) {
+        // 在方法缓冲中搜索方法
         imp = cache_getImp(cls, sel);
         if (imp) return imp;
     }
@@ -5192,14 +5247,21 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     runtimeLock.lock();
     checkIsKnownClass(cls);
 
+    // 方法固定相关操作
     if (!cls->isRealized()) {
         realizeClass(cls);
     }
 
+    // 若类的initialize()方法未调用，则先进行类的initialize初始化过程
+    
     if (initialize  &&  !cls->isInitialized()) {
         runtimeLock.unlock();
-        _class_initialize (_class_getNonMetaClass(cls, inst));
+        
+        // initialize()方法 在第一次调用类的方法时，在lookUpImpOrForward(...)中检查类是否初始化时触发，因此若父类实现了initialize()方法，
+        // 但是其所有子类均未实现，则无论是第一次调用子类还是父类的方法，都会触发父类的initialize()方法。
+        _class_initialize (_class_getNonMetaClass(cls, inst)); // 调用类的initialize()方法
         runtimeLock.lock();
+        
         // If sel == initialize, _class_initialize will send +initialize and 
         // then the messenger will send +initialize again after this 
         // procedure finishes. Of course, if this is not being called 
@@ -5211,12 +5273,13 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     runtimeLock.assertLocked();
 
     // Try this class's cache.
-
+    // 在类的cache_t方法缓存哈希表中查询SEL对应的IMP
     imp = cache_getImp(cls, sel);
     if (imp) goto done;
 
     // Try this class's method lists.
     {
+        // 在类的method_array_t方法列表容器中查询SEL对应的IMP
         Method meth = getMethodNoSuper_nolock(cls, sel);
         if (meth) {
             log_and_fill_cache(cls, meth->imp, sel, inst, cls);
@@ -5227,6 +5290,7 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
     // Try superclass caches and method lists.
     {
+    // 沿着类的继承链循环。在各级类及父类的方法缓冲、方法列表容器中查询SEL对应的IMP
         unsigned attempts = unreasonableClassCount();
         for (Class curClass = cls->superclass;
              curClass != nil;
@@ -5238,10 +5302,14 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
             }
             
             // Superclass cache.
+             // 在类的方法缓存中查询
             imp = cache_getImp(curClass, sel);
             if (imp) {
+                
+                // extern void _objc_msgForward_impcache(void); Runtime预定义的标记进入消息转发流程的IMP
                 if (imp != (IMP)_objc_msgForward_impcache) {
                     // Found the method in a superclass. Cache it in this class.
+                    // 若搜索到IMP，则将IMP写入父类的方法缓存
                     log_and_fill_cache(cls, imp, sel, inst, curClass);
                     goto done;
                 }
@@ -5254,8 +5322,10 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
             }
             
             // Superclass method list.
+            // 在类的方法列表中查询
             Method meth = getMethodNoSuper_nolock(curClass, sel);
             if (meth) {
+                // 若搜索到IMP，则将IMP写入父类的方法缓存
                 log_and_fill_cache(cls, meth->imp, sel, inst, curClass);
                 imp = meth->imp;
                 goto done;
@@ -5264,19 +5334,30 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     }
 
     // No implementation found. Try method resolver once.
-
+    
+    // 2.没有找到IMP, 走‘一次’动态方法解析 在动态解析中调用lookUpImpOrForward(...)中resolver设置为NO,所以只会走一次动态解析
     if (resolver  &&  !triedResolver) {
         runtimeLock.unlock();
+        
+        // 走动态解析逻辑
         _class_resolveMethod(cls, sel, inst);
+        
         runtimeLock.lock();
         // Don't cache the result; we don't hold the lock so it may have 
         // changed already. Re-do the search from scratch instead.
+        
+        // 标记为已动态解析过了
         triedResolver = YES;
+        
+        // 重新走消息查找逻辑
         goto retry;
     }
 
     // No implementation found, and method resolver didn't help. 
     // Use forwarding.
+
+    // 3.触发消息转发流程
+    // 找不到IMP且动态方法解析没有其作用,走消息转发 （消息转发没开源只能看汇编）
 
     imp = (IMP)_objc_msgForward_impcache;
     cache_fill(cls, sel, imp, inst);
@@ -5296,6 +5377,7 @@ IMP lookUpImpOrNil(Class cls, SEL sel, id inst,
                    bool initialize, bool cache, bool resolver)
 {
     IMP imp = lookUpImpOrForward(cls, sel, inst, initialize, cache, resolver);
+    
     if (imp == _objc_msgForward_impcache) return nil;
     else return imp;
 }

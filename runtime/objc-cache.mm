@@ -156,6 +156,7 @@ asm("\n .section __TEXT,__const"
 // objc_msgSend has few registers available.
 // Cache scan increments and wraps at special end-marking bucket.
 #define CACHE_END_MARKER 1
+
 static inline mask_t cache_next(mask_t i, mask_t mask) {
     return (i+1) & mask;
 }
@@ -164,8 +165,9 @@ static inline mask_t cache_next(mask_t i, mask_t mask) {
 // objc_msgSend has lots of registers available.
 // Cache scan decrements. No end marker needed.
 #define CACHE_END_MARKER 0
+// 找下一个索引
 static inline mask_t cache_next(mask_t i, mask_t mask) {
-    return i ? i-1 : mask;
+    return i ? i-1 : mask;  // i!=0时 i=i-1; i=0时,将i设置为索引的最大值mask(容量值-1)
 }
 
 #else
@@ -242,7 +244,7 @@ ldp(uintptr_t& onep, uintptr_t& twop, const void *srcp)
 
 // Class points to cache. SEL is key. Cache buckets store SEL+IMP.
 // Caches are never built in the dyld shared cache.
-
+// 苹果的hash算法—--超级简单
 static inline mask_t cache_hash(cache_key_t key, mask_t mask) 
 {
     return (mask_t)(key & mask);
@@ -476,6 +478,7 @@ void cache_t::reallocate(mask_t oldCapacity, mask_t newCapacity)
     bool freeOld = canBeFreed();
 
     bucket_t *oldBuckets = buckets();
+    // 创建新的哈希表（扩容）
     bucket_t *newBuckets = allocateBuckets(newCapacity);
 
     // Cache's old contents are not propagated. 
@@ -484,10 +487,12 @@ void cache_t::reallocate(mask_t oldCapacity, mask_t newCapacity)
 
     assert(newCapacity > 0);
     assert((uintptr_t)(mask_t)(newCapacity-1) == newCapacity-1);
-
+    
+    // 设置newBuckets 和 mask（mask等于newCapacity -1）
     setBucketsAndMask(newBuckets, newCapacity - 1);
     
     if (freeOld) {
+        // 释放旧的哈希表，扩容之前缓存的数据会被清掉。
         cache_collect_free(oldBuckets, oldCapacity);
         cache_collect(false);
     }
@@ -520,32 +525,39 @@ void cache_t::bad_cache(id receiver, SEL sel, Class isa)
          "invalid object, or a memory error somewhere else.");
 }
 
-
+//通过key获取hash表中的值
 bucket_t * cache_t::find(cache_key_t k, id receiver)
 {
     assert(k != 0);
-
+    // 获取哈希表
     bucket_t *b = buckets();
+    // 获取mask
     mask_t m = mask();
+    // 通过k（是@selector）和 m（是mask）得到索引值。这个hash算法很简单,仅仅按位与操作
     mask_t begin = cache_hash(k, m);
     mask_t i = begin;
+    // 直接通过索引中取出key
     do {
         if (b[i].key() == 0  ||  b[i].key() == k) {
+            // 如果取出的key不存在说明，这个位置没有被占用,返回并退出循环
+            // 如果取出的key和传入的key相等，说明找到了正确的值,返回并退出循环
             return &b[i];
         }
-    } while ((i = cache_next(i, m)) != begin);
+    } while ((i = cache_next(i, m)) != begin); // 来到这说明没找到正确的值。那就改变索引i的值,继续寻找（改变后的i不能与开始时的begin相等）
+
 
     // hack
     Class cls = (Class)((uintptr_t)this - offsetof(objc_class, cache));
     cache_t::bad_cache(receiver, (SEL)k, cls);
 }
 
-
+// 缓存扩容
 void cache_t::expand()
 {
     cacheUpdateLock.assertLocked();
     
     uint32_t oldCapacity = capacity();
+    // 容量变为原来大小的两倍
     uint32_t newCapacity = oldCapacity ? oldCapacity*2 : INIT_CACHE_SIZE;
 
     if ((uint32_t)(mask_t)newCapacity != newCapacity) {
@@ -553,7 +565,7 @@ void cache_t::expand()
         // fixme this wastes one bit of mask
         newCapacity = oldCapacity;
     }
-
+    // 重新分配大小
     reallocate(oldCapacity, newCapacity);
 }
 
