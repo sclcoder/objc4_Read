@@ -324,9 +324,12 @@ struct property_t {
 
 // Two bits of entsize are used for fixup markers.
 struct method_list_t : entsize_list_tt<method_t, method_list_t, 0x3> {
+    // 查询方法列表是否已排序
     bool isFixedUp() const;
+    // 标记方法列表已排序
     void setFixedUp();
 
+    // 新增返回方法在顺序表中的索引值的方法
     uint32_t indexOfMethod(const method_t *meth) const {
         uint32_t i = 
             (uint32_t)(((uintptr_t)meth - (uintptr_t)this) / entsize());
@@ -776,15 +779,43 @@ struct class_ro_t {
 * countLists/beginLists/endLists iterate the metadata lists
 * count/begin/end iterate the underlying metadata elements
 **********************************************************************/
+
+
+/**
+ 
+ 
+ Runtime 定义list_array_tt类模板表示二维数组容器。
+ list_array_tt保存的数据主体是一个联合体，包含list和arrayAndFlag成员，表示：容器要么保存一维数组，此时联合体直接保存一维数组的地址，地址的最低位必为0；要么保存二维数组，此时联合体保存二维数组的首个列表元素的地址，且最低位置为1。
+ 
+ 调用hasArray()方法可以查询容器是否保存的是二维数组，返回arrayAndFlag & 1，即通过最低位是否为1进行判断；
+ 
+ 调用list_array_tt的array()方法可以获取二维数组容器的地址，返回arrayAndFlag & ~1，即忽略最低位。
+ 
+ 
+ 
+ 当联合体保存二维数组时，联合体的arrayAndFlag指向list_array_tt内嵌定义的array_t结构体。
+ 
+ 该结构体是简单的一维数组容器，但其元素为指向列表容器的指针，因此array_t的本质是二维数组。
+ 
+ 调用array_t的byteSize()可以返回列表容器占用的总字节数，为array_t结构体本身的size与保存列表元素的连续内存区块的size之和。
+
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da4740651882535b7242eaa
+ */
+
+// 二维数组容器模板类
 template <typename Element, typename List>
 class list_array_tt {
+    
+    // 定义二维数组的外层一维数组容器
     struct array_t {
-        uint32_t count;
-        List* lists[0];
+        uint32_t count; // 外层一维数组存储元素数量
+        List* lists[0]; // 内层一维数组容器
 
         static size_t byteSize(uint32_t count) {
             return sizeof(array_t) + count*sizeof(lists[0]);
         }
+        // 计算容器占用字节数
         size_t byteSize() {
             return byteSize(count);
         }
@@ -792,17 +823,18 @@ class list_array_tt {
 
  protected:
     class iterator {
-        List **lists;
-        List **listsEnd;
-        typename List::iterator m, mEnd;
-
+        List **lists; // 当前迭代到的数组的位置
+        List **listsEnd; // 二维数组的外层容器的结尾；
+        typename List::iterator m, mEnd; // m:当前迭代到的数组中的元素的位置；mEnd:当前迭代到的数组的结尾；
+        // 内嵌迭代器的定义
      public:
+        // 构建从begin指向的列表，到end指向的列表的迭代器
         iterator(List **begin, List **end) 
             : lists(begin), listsEnd(end)
         {
             if (begin != end) {
-                m = (*begin)->begin();
-                mEnd = (*begin)->end();
+                m = (*begin)->begin(); // 此处的begin()是 List::iterator中的 (entsize_list_tt)
+                mEnd = (*begin)->end(); // 此处的begin()是 List::iterator中的 (entsize_list_tt)
             }
         }
 
@@ -819,7 +851,8 @@ class list_array_tt {
             if (m != rhs.m) return true;
             return false;
         }
-
+    
+        // 迭代时，若达到当前数组的结尾，则切换到下一个数组的开头
         const iterator& operator ++ () {
             assert(m != mEnd);
             m++;
@@ -837,45 +870,50 @@ class list_array_tt {
 
  private:
     union {
-        List* list;
-        uintptr_t arrayAndFlag;
+        List* list; // 要么指向一维数组容器
+        uintptr_t arrayAndFlag; // 要么指向二维数组容器
     };
-
+    
+    // 容器是否保存的是二维数组
     bool hasArray() const {
-        return arrayAndFlag & 1;
+        return arrayAndFlag & 1; // arrayAndFlag & 1，即通过最低位是否为1进行判断；
     }
-
+    
+    // 获取容器(指list_array_tt这个class)保存的二维数组的地址
     array_t *array() {
-        return (array_t *)(arrayAndFlag & ~1);
+        return (array_t *)(arrayAndFlag & ~1); // arrayAndFlag & ~1，即忽略最低位。
     }
 
     void setArray(array_t *array) {
-        arrayAndFlag = (uintptr_t)array | 1;
+        arrayAndFlag = (uintptr_t)array | 1; // (uintptr_t)array | 1,即最低位置为1
     }
 
  public:
-
+    // 计算方法列表二维数组容器中所有Element的数量
     uint32_t count() {
         uint32_t result = 0;
+        
+        /// lists是指向List*类型的指针 (*lists)就是获取List类型的数据  ++lists是List*为单位的递增
         for (auto lists = beginLists(), end = endLists(); 
              lists != end;
              ++lists)
         {
-            result += (*lists)->count;
+            
+            result += (*lists)->count; // 注意该count定义在entsize_list_tt模板中
         }
         return result;
     }
-
+    // 获取Element列表二维数组容器的起始迭代器
     iterator begin() {
         return iterator(beginLists(), endLists());
     }
-
+    // 获取Element列表二维数组容器的结束迭代器
     iterator end() {
         List **e = endLists();
         return iterator(e, e);
     }
 
-
+    // 获取Element列表二维数组容器包含的列表数量
     uint32_t countLists() {
         if (hasArray()) {
             return array()->count;
@@ -885,15 +923,45 @@ class list_array_tt {
             return 0;
         }
     }
+    
+    
+    /**
+     https://bbs.csdn.net/topics/380226723
+     
+     指针、数组名、地址这几个东西混在一起是不少人头疼的，它们之间有紧密的关系，但不是完全含义相同的。
 
+     指针是指针常量、指针变量、指针表达式范畴内的类型概念，我不赞同指针是指针变量的简称这一说法。
+
+     数组名（先限定在一维数组范围内）是首元素的指针（不要简单说是数组首址），是指针常量。
+
+     地址只是某个存储单元的位置序号（无符号整数），它本身没有类型（不提供从这个单元开始存储数据的类型信息）。
+
+     指针的值是地址，但指针（指针常量、指针变量、指针表达式（包括了返回指针的函数））还带有类型（带有从这个单元开始存储数据的类型）！
+
+     二维数组为例：
+     int a[M][N];
+     &a[i][j]+1 //都知道是下一个元素a[i][j+1]的指针，表达式中的1的类型是从&a[i][j]处得到的
+     &a[1]+1    //这是下一行a[i+1]的指针,同理表达式中的1的类型是从&a[i]处得到的
+     &a+1       //这已经不是a范围内的指针了，但可以理解为a数组后的那个单元的指针，形式上地址值为&[M][0]--越界了，想表达的这里的1的类型是&a的
+
+
+     上述几个例子中指针表达式（泛称）中都有+1，这个1显然不是相同的含义，即1有类型、从+号左边的指针表达式传递来的“类型”
+     而+1左边的指针表达式，其地址编码完全相同－－－－不附加指针表达式的“类型”概念是无法解释清楚的
+     
+     */
+    
+    // 获取xx列表二维数组容器的起始地址 List**表示二维数组存放的是List*类型的地址
     List** beginLists() {
         if (hasArray()) {
-            return array()->lists;
+            return array()->lists; // array()获取的是外层一维数组的地址 array()->lists获取的是内部一维数组的地址
+                                   // 这样返回值是指向List*类型的指针(指针的值是地址，但是带有类型该类型是List*，这样在做运算时单位就是List*)
+                                   // 相当于&array[0]
         } else {
             return &list;
         }
     }
-
+    
+    // 获取Element列表二维数组容器的结束地址
     List** endLists() {
         if (hasArray()) {
             return array()->lists + array()->count;
@@ -904,37 +972,64 @@ class list_array_tt {
         }
     }
 
+    /****
+
+     attachLists(...)：将列表元素添加到二维数组容器的开头，注意到list_array_t没有定义构造函数，
+     这是因为构造逻辑均在attachLists(...)中，包含容器从空转化为保存一位数组，再转化为保存二维数组的处理逻辑；
+     
+     tryFree()：释放二维数组容器占用内存；
+     
+     duplicate(...)：复制二维数组容器；
+
+     作者：Luminix
+     链接：https://juejin.im/post/5da4740651882535b7242eaa
+     */
+    
+    // 向二维数组容器中添加列表 添加的是指向List*类型的指针
     void attachLists(List* const * addedLists, uint32_t addedCount) {
         if (addedCount == 0) return;
 
-        if (hasArray()) {
+        if (hasArray()) { // 当容器中保存的是二维数组
             // many lists -> many lists
-            uint32_t oldCount = array()->count;
+            uint32_t oldCount = array()->count; // 外层一维数组的count
             uint32_t newCount = oldCount + addedCount;
+            // 分配新内存空间重新构建容器
             setArray((array_t *)realloc(array(), array_t::byteSize(newCount)));
+            
             array()->count = newCount;
+            
+            // 转移容器原内容到新内存空间 将以前的Element列表添加在数组后边
             memmove(array()->lists + addedCount, array()->lists, 
                     oldCount * sizeof(array()->lists[0]));
+            
+            // 将需要新增的Element列表拷贝到新内存空间 将以前的Element列表内容添加在数组前面
             memcpy(array()->lists, addedLists, 
                    addedCount * sizeof(array()->lists[0]));
         }
         else if (!list  &&  addedCount == 1) {
             // 0 lists -> 1 list
+            // 当容器中无任何方法，直接将list成员指向addedLists
             list = addedLists[0];
         } 
         else {
             // 1 list -> many lists
+            // 当容器中保存的是一维数组
             List* oldList = list;
             uint32_t oldCount = oldList ? 1 : 0;
             uint32_t newCount = oldCount + addedCount;
+            
             setArray((array_t *)malloc(array_t::byteSize(newCount)));
+            
             array()->count = newCount;
+            /// 将数据存在array的一个lists中
             if (oldList) array()->lists[addedCount] = oldList;
+            
             memcpy(array()->lists, addedLists, 
                    addedCount * sizeof(array()->lists[0]));
         }
     }
 
+    // 释放二维数组容器占用内存；
     void tryFree() {
         if (hasArray()) {
             for (uint32_t i = 0; i < array()->count; i++) {
@@ -946,7 +1041,8 @@ class list_array_tt {
             try_free(list);
         }
     }
-
+    
+    // 复制二维数组容器；
     template<typename Result>
     Result duplicate() {
         Result result;
@@ -967,7 +1063,7 @@ class list_array_tt {
     }
 };
 
-
+// 方法列表二维数组容器 容器中存放的是指向method_list_t指针的地址
 class method_array_t : 
     public list_array_tt<method_t, method_list_t> 
 {
@@ -975,7 +1071,7 @@ class method_array_t :
 
  public:
     method_list_t **beginCategoryMethodLists() {
-        return beginLists();
+        return beginLists(); /// 返回指向容器的第一个方法列表地址，这个地址存放的内容是一个method_list_t指针的地址
     }
     
     method_list_t **endCategoryMethodLists(Class cls);

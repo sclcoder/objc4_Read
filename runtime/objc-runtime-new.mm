@@ -237,8 +237,7 @@ void protocol_t::setFixedUp() {
     flags = (flags & ~PROTOCOL_FIXED_UP_MASK) | fixed_up_protocol;
 }
 
-
-method_list_t **method_array_t::endCategoryMethodLists(Class cls) 
+method_list_t **method_array_t::endCategoryMethodLists(Class cls)
 {
     method_list_t **mlists = beginLists();
     method_list_t **mlistsEnd = endLists();
