@@ -34,6 +34,8 @@ typedef uintptr_t cache_key_t;
 struct swift_class_t;
 
 
+// 方法名SEL为Key，以方法IMP为Value，分别对应bucket_t结构体的_sel、_imp成员
+// 方法缓冲哈希表的元素，_sel为key，_imp为value
 struct bucket_t {
 private:
     // IMP-first is better for arm64e ptrauth and no worse for arm64.
@@ -55,10 +57,15 @@ public:
     void set(cache_key_t newKey, IMP newImp);
 };
 
-
+// 方法缓冲的数据结构
 struct cache_t {
+    // _buckets：保存哈希表所有元素的数组
+    // bucket_t：方法缓冲哈希表的元素，_sel为key，_imp为value
     struct bucket_t *_buckets;
+    
+    // _mask：间接表示哈希表的容量，为全部位为1的二进制数。哈希表容量最小为4，满足公式：哈希表容量 = _mask + 1。扩容时设置_mask =(_mask + 1) & _mask；
     mask_t _mask;
+    // _occupied：哈希表实际缓存的方法个数；
     mask_t _occupied;
 
 public:

@@ -6042,7 +6042,12 @@ addMethod(Class cls, SEL name, IMP imp, const char *types, bool replace)
         
         // 添加方法到类的class_rw_t的methods中
         cls->data()->methods.attachLists(&newlist, 1);
-        // 处理2
+        
+        /**
+         调用flushCache(...)时用于清空指定类的方法缓冲。
+         之所以清空是因为addMethod(...)可能会触发方法IMP变更，必须保证方法缓冲中保存的所有方法SEL与IMP映射的正确性。
+         关于方法缓冲的具体细节见 Runtime 源代码objc-cache.mm。
+         */
         flushCaches(cls);
 
         result = nil;
