@@ -700,21 +700,35 @@ fixupMethodList(method_list_t *mlist, bool bundleCopy, bool sort)
         // Unique selectors in list.
         for (auto& meth : *mlist) {
             const char *name = sel_cname(meth.name);
+            // 调用sel_registerNameNoLock函数将方法列表中所有方法的SEL注册到内存，注册的内存实际是以 方法名字符串 为键值，将SEL插入到系统维护的namedSelectors哈希表中；
             meth.name = sel_registerNameNoLock(name, bundleCopy);
         }
     }
 
     // Sort by selector address.
+    // 按照SEL对方法列表排序
+    // 对方法列表排序，是为了使方法列表支持二分查找，从而降低通过SEL在方法列表中搜索IMP的时间复杂度
     if (sort) {
         method_t::SortBySELAddress sorter;
         std::stable_sort(mlist->begin(), mlist->end(), sorter);
     }
     
     // Mark method list as uniqued and sorted
+    // 标记方法列表已经排好序并固定。
+    // method_list_t的entsizeAndFlags最低两位均为1表示方法列表已经排好序并固定
     mlist->setFixedUp();
 }
 
 
+/**
+   prepareMethodLists(...)函数，该方法主要调用了fixupMethodList(...)函数。fixupMethodList(...)做了三件事情：
+
+   调用sel_registerNameNoLock函数将方法列表中所有方法的SEL注册到内存，注册的内存实际是以 方法名字符串 为键值，将SEL插入到系统维护的namedSelectors哈希表中；
+   对方法列表内的所有方法进行排序；
+   将方法列表状态标记为isFixedUp，表示方法列表已排序；
+
+   之所以对方法列表排序，是为了使方法列表支持二分查找，从而降低通过SEL在方法列表中搜索IMP的时间复杂度。
+   */
 static void 
 prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount, 
                    bool baseMethods, bool methodsFromBundle)
@@ -723,7 +737,8 @@ prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount,
 
     if (addedCount == 0) return;
 
-    // Don't scan redundantly
+    // Don't scan redundantly(多余地)
+
     bool scanForCustomRR = !cls->hasCustomRR();
     bool scanForCustomAWZ = !cls->hasCustomAWZ();
 
@@ -744,7 +759,12 @@ prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount,
         assert(mlist);
 
         // Fixup selectors if necessary
-        if (!mlist->isFixedUp()) {
+        if (!mlist->isFixedUp()) { // 修复selectors
+            
+            // 调用sel_registerNameNoLock函数将方法列表中所有方法的SEL注册到内存，注册的内存实际是以 方法名字符串 为键值，将SEL插入到系统维护的namedSelectors哈希表中；
+            // 对方法列表内的所有方法进行排序；
+            // 将方法列表状态标记为isFixedUp，表示方法列表已排序；
+            
             fixupMethodList(mlist, methodsFromBundle, true/*sort*/);
         }
 
@@ -3324,9 +3344,9 @@ _method_setImplementation(Class cls, method_t *m, IMP imp)
     // RR/AWZ updates are slow if cls is nil (i.e. unknown)
     // fixme build list of classes whose Methods are known externally?
 
-    flushCaches(cls);
+    flushCaches(cls); // 清空cls类的方法缓冲
 
-    updateCustomRR_AWZ(cls, m);
+    updateCustomRR_AWZ(cls, m);  // 对retain/release等MRC方法，以及allocWithZone方法的特殊处理
 
     return old;
 }
@@ -5990,15 +6010,16 @@ addMethod(Class cls, SEL name, IMP imp, const char *types, bool replace)
     assert(cls->isRealized());
 
     method_t *m;
-    if ((m = getMethodNoSuper_nolock(cls, name))) {
+    if ((m = getMethodNoSuper_nolock(cls, name))) {  // 若方法已经存在
         // already exists
         if (!replace) {
             result = m->imp;
         } else {
-            result = _method_setImplementation(cls, m, imp);
+            result = _method_setImplementation(cls, m, imp); // 设置方法IMP
         }
     } else {
         // fixme optimize
+        // 若方法不存在，则构建方法列表容器
         method_list_t *newlist;
         newlist = (method_list_t *)calloc(sizeof(*newlist), 1);
         newlist->entsizeAndFlags = 
@@ -6008,8 +6029,20 @@ addMethod(Class cls, SEL name, IMP imp, const char *types, bool replace)
         newlist->first.types = strdupIfMutable(types);
         newlist->first.imp = imp;
 
+        /**
+         prepareMethodLists(...)函数，该方法主要调用了fixupMethodList(...)函数。fixupMethodList(...)做了三件事情：
+
+         调用sel_registerNameNoLock函数将方法列表中所有方法的SEL注册到内存，注册的内存实际是以 方法名字符串 为键值，将SEL插入到系统维护的namedSelectors哈希表中；
+         对方法列表内的所有方法进行排序；
+         将方法列表状态标记为isFixedUp，表示方法列表已排序；
+
+         之所以对方法列表排序，是为了使方法列表支持二分查找，从而降低通过SEL在方法列表中搜索IMP的时间复杂度。
+         */
         prepareMethodLists(cls, &newlist, 1, NO, NO);
+        
+        // 添加方法到类的class_rw_t的methods中
         cls->data()->methods.attachLists(&newlist, 1);
+        // 处理2
         flushCaches(cls);
 
         result = nil;
@@ -6096,7 +6129,7 @@ addMethods(Class cls, const SEL *names, const IMP *imps, const char **types,
     return failedNames;
 }
 
-
+// 添加方法
 BOOL 
 class_addMethod(Class cls, SEL name, IMP imp, const char *types)
 {
@@ -6106,7 +6139,7 @@ class_addMethod(Class cls, SEL name, IMP imp, const char *types)
     return ! addMethod(cls, name, imp, types ?: "", NO);
 }
 
-
+// 替换方法实现
 IMP 
 class_replaceMethod(Class cls, SEL name, IMP imp, const char *types)
 {

@@ -163,6 +163,7 @@ static SEL __sel_registerName(const char *name, bool shouldLock, bool copy)
     if (!result) {
         result = sel_alloc(name, copy);
         // fixme choose a better container (hash not map for starters)
+        // 方法名字符串 为键值，将SEL插入到系统维护的namedSelectors哈希表中
         NXMapInsert(namedSelectors, sel_getName(result), result);
     }
 

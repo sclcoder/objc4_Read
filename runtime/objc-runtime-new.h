@@ -261,6 +261,7 @@ struct method_t {
     const char *types; // 方法的类型编码
     MethodListIMP imp; // 方法的实现，即方法的函数指针、方法的IMP
 
+    // 方法在方法列表中排序时使用
     struct SortBySELAddress :
         public std::binary_function<const method_t&,
                                     const method_t&, bool>
