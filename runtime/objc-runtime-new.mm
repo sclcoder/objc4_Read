@@ -6393,6 +6393,7 @@ BOOL class_addProtocol(Class cls, Protocol *protocol_gen)
 * Adds a property to a class.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 添加属性、替换属性的实现逻辑
 static bool 
 _class_addProperty(Class cls, const char *name, 
                    const objc_property_attribute_t *attrs, unsigned int count, 
@@ -6400,14 +6401,16 @@ _class_addProperty(Class cls, const char *name,
 {
     if (!cls) return NO;
     if (!name) return NO;
-
+    // 根据名称获取类的属性
     property_t *prop = class_getProperty(cls, name);
     if (prop  &&  !replace) {
         // already exists, refuse to replace
+        // 已存在且不是指定替换属性
         return NO;
     } 
     else if (prop) {
         // replace existing
+        // 替换属性
         mutex_locker_t lock(runtimeLock);
         try_free(prop->attributes);
         prop->attributes = copyPropertyAttributeString(attrs, count);
@@ -6430,14 +6433,14 @@ _class_addProperty(Class cls, const char *name,
         return YES;
     }
 }
-
+// 添加属性
 BOOL 
 class_addProperty(Class cls, const char *name, 
                   const objc_property_attribute_t *attrs, unsigned int n)
 {
     return _class_addProperty(cls, name, attrs, n, NO);
 }
-
+// 替换属性
 void 
 class_replaceProperty(Class cls, const char *name, 
                       const objc_property_attribute_t *attrs, unsigned int n)

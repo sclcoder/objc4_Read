@@ -325,9 +325,40 @@ struct ivar_t {
      ***/
 };
 
+
+
+/**
+ 
+ 
+ 一、属性概述
+ 
+ 属性（property）是为类的成员变量提供公开的访问器。属性与方法有非常紧密的联系，可读写的属性有 getter 和 setter 两个方法与之对应。
+ 
+ 属性（property）大多数情况是作为成员变量的访问器（accessor）使用，为外部访问成员变量提供接口。使用@property声明属性时需要指定属性的特性（attribute），
+ 包括：
+
+     读写特性（readwrite/readonly）；
+     原子性（atomic/nonatomic）；
+     内存管理特性（assign/strong/weak/copy）；
+     是否可空（nullable/nonnull）；
+
+
+ 注意：上面括号中的第一个值是属性的默认特性，不过是否可空有其特殊性，可以通过NS_ASSUME_NONNULL_BEGIN/NS_ASSUME_NONNULL_END宏包围属性的声明语句，将属性的默认可空特性置为nonnull。
+
+ 除了上述特性还可以显式指定getter、setter。属性的特性指定了属性作为访问器的行为特征。声明了属性只是意味着声明了访问器，此时的访问器是没有getter和setter的实现的，想要访问器关联特定的成员变量在代码上有两种方式：
+      1、使用@synthesize修饰符合成属性；
+      2、实现属性的 getter 和 setter。但是两者的本质是一样的，就是按属性的特性实现属性的 getter 和 setter。
+
+ 注意：@dynamic修饰属性，表示不合成属性的 getter 和 setter。此时要么在当前类或子类的实现中实现getter/setter、要么在子类实现中用@synthesize合成属性。
+
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da491d95188252f051e24e1
+
+ */
+
 struct property_t {
-    const char *name;
-    const char *attributes;
+    const char *name; // 有属性名、
+    const char *attributes; // 特性信息
 };
 
 // Two bits of entsize are used for fixup markers.
@@ -353,7 +384,7 @@ struct ivar_list_t : entsize_list_tt<ivar_t, ivar_list_t, 0> {
         return (ivar >= (Ivar)&*begin()  &&  ivar < (Ivar)&*end());
     }
 };
-
+/// 类似ivar_list_t、method_list_t
 struct property_list_t : entsize_list_tt<property_t, property_list_t, 0> {
 };
 
@@ -1125,7 +1156,7 @@ class method_array_t :
      */
 };
 
-
+/// 属性列表二维数组容器 容器中存放的是指向property_list_t指针的地址
 class property_array_t : 
     public list_array_tt<property_t, property_list_t> 
 {
