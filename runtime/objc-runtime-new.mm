@@ -181,7 +181,11 @@ const uintptr_t objc_debug_isa_magic_value = 0;
 **********************************************************************/
 static NXHashTable *allocatedClasses = nil;
 
+/**
+ 
+ 类并不包含像分类列表这样的数据结构，category_t结构体只是为了在编译阶段记录开发者定义的分类，并将其保存到特定的容器中。但是程序本身则需要保存分类列表，因为加载程序时，需要按照容器内记录的分类信息依次加载分类。保存应用定义的所有分类的容器是category_list，也是locstamped_category_list_t的别名。locstamped_category_list_t是顺序表容器，元素为locstamped_category_t结构体。locstamped_category_t结构体包含指向category_t结构体的cat成员。
 
+ */
 typedef locstamped_category_list_t category_list;
 
 
@@ -526,6 +530,16 @@ static void checkIsKnownClass(Class cls)
 * Records an unattached category.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+
+/**
+ 尚未将方法列表、属性列表等信息添加到所扩展类的class_rw_t中 的分类，统一保存在一个静态的NXMapTable类的哈希表中。
+ 
+ 该哈希表以Class作为关键字，category_list为值。通过unattachedCategories()获取该哈希表。
+ 
+ (category_list *)NXMapGet(unattachedCategories(), cls)表示获取类cls的未处理分类列表，需要对cls添加未处理分类时，
+ 将其添加到类的未处理分类列表的结尾。
+ 
+ */
 static void addUnattachedCategoryForClass(category_t *cat, Class cls, 
                                           header_info *catHeader)
 {
@@ -543,6 +557,7 @@ static void addUnattachedCategoryForClass(category_t *cat, Class cls,
         list = (category_list *)
             realloc(list, sizeof(*list) + sizeof(list->list[0]) * (list->count + 1));
     }
+    // 将分类添加到list的末尾
     list->list[list->count++] = (locstamped_category_t){cat, catHeader};
     NXMapInsert(cats, cls, list);
 }
@@ -784,6 +799,10 @@ prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount,
 // Attach method lists and properties and protocols from categories to a class.
 // Assumes the categories in cats are all loaded and sorted by load order, 
 // oldest categories first.
+
+
+
+
 static void 
 attachCategories(Class cls, category_list *cats, bool flush_caches)
 {
@@ -801,11 +820,15 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
         malloc(cats->count * sizeof(*protolists));
 
     // Count backwards through cats to get newest categories first
+    
     int mcount = 0;
     int propcount = 0;
     int protocount = 0;
     int i = cats->count;
     bool fromBundle = NO;
+    
+    // 注意分类列表的遍历是从后向前的，因此方法列表二维数组容器中，元素对应的分类的顺序
+    // 和cats是一致的。
     while (i--) {
         auto& entry = cats->list[i];
 
@@ -828,15 +851,17 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
     }
 
     auto rw = cls->data();
-
+    // 添加分类的方法列表 到类  rw->methods.attachLists
     prepareMethodLists(cls, mlists, mcount, NO, fromBundle);
     rw->methods.attachLists(mlists, mcount);
     free(mlists);
     if (flush_caches  &&  mcount > 0) flushCaches(cls);
-
+    
+    // 添加分类的属性列表 到类
     rw->properties.attachLists(proplists, propcount);
     free(proplists);
-
+    
+    // 添加分类的协议列表 到类
     rw->protocols.attachLists(protolists, protocount);
     free(protolists);
 }
@@ -935,6 +960,7 @@ static void remethodizeClass(Class cls)
     isMeta = cls->isMetaClass();
 
     // Re-methodizing: check for more categories
+    // 将类的未处理分类列表从哈希表中推出
     if ((cats = unattachedCategoriesForClass(cls, false/*not realizing*/))) {
         if (PrintConnecting) {
             _objc_inform("CLASS: attaching categories to class '%s' %s", 
@@ -2963,7 +2989,18 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     for (EACH_HEADER) {
         
         /**
-         分类中扩展类的遵循协议列表、属性列表、方法列表需要在运行时添加到类的class_rw_t数据中，该过程必须在类的内存地址、class_rw_t内存地址、类的对象内存布局确定后方能进行。大致过程如下：
+         分类的加载是在应用的加载阶段，当应用完成类的基本信息（编译时决议的信息）加载后，
+         需要将类的所有分类中的定义属性列表、方法列表等元素也添加到类的class_rw_t中。
+         分类加载的核心代码在_read_images(...)逻辑中。
+         其中的关键环节包括：
+            1、调用addUnattachedCategoryForClass(...)将分类添加到类的 未处理分类列表；
+            2、调用remethodizeClass(...)根据分类重构类的方法列表，两个处理成对存在。
+         
+         前者收集所有未加载的分类列表，后者将未加载的分类列表中的方法列表、属性列表等信息加载到类中。
+         
+         
+         
+          具体流程： 分类中扩展类的遵循协议列表、属性列表、方法列表需要在运行时添加到类的class_rw_t数据中，该过程必须在类的内存地址、class_rw_t内存地址、类的对象内存布局确定后方能进行。大致过程如下：
 
          .调用_getObjc2CategoryList(...)函数获取镜像的__objc_catlist数据 section 中保存的镜像中定义的分类列表；
          
@@ -2980,6 +3017,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
          */
         
         // 调用_getObjc2CategoryList(...)函数获取镜像的__objc_catlist数据 section 中保存的镜像中定义的分类列表
+        // 获取分类列表，分类列表的顺序是后编译的分类在前（由attachCategories中分类列表的遍历顺序,结合attachList的行为特征 以及 类的不同分类定义的同名方法的调用优先级，共同推断出）
         category_t **catlist = 
             _getObjc2CategoryList(hi, &count);
         
@@ -2994,7 +3032,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 // Category's target class is missing (probably weak-linked).
                 // Disavow any knowledge of this category.
                 
-                // 分类所扩展的类为空则报错
+                // 分类所扩展的类为空则报错 即丢弃该分类的所有信息
                 catlist[i] = nil;
                 if (PrintConnecting) {
                     _objc_inform("CLASS: IGNORING category \?\?\?(%s) %p with "
@@ -3009,16 +3047,29 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             // Then, rebuild the class's method lists (etc) if 
             // the class is realized.
             
-            // 协议、实例方法、实例属性添加到类的class_rw_t中
-           
+            // 协议、实例方法、实例属性添加到类的class_rw_t
+            
+           // 首先将分类添加到类的未处理分类
+           // 然后处理逐个类的未处理分类，重构类的属性列表、方法列表
+            
+           // 类的处理
             bool classExists = NO;
             if (cat->instanceMethods ||  cat->protocols  
                 ||  cat->instanceProperties) 
             {
                 // 调用addUnattachedCategoryForClass(...)将分类添加到扩展类的待处理分类哈希表，
                 addUnattachedCategoryForClass(cat, cls, hi);
+                
+                // 必须保证 class realizing 已完成，因为`class_ro_t`信息固定后才能开始配置`class_rw_t`中的信息
                 if (cls->isRealized()) {
-                     // 然后调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的class_rw_t数据中
+                    
+                /**
+                 调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的class_rw_t数据中
+                 类的方法列表二维数组容器中后编译的分类的method_list_t在前，先编译的分类的method_list_t在后。
+                 在方法列表中查询方法时是以从开头到结尾的顺序遍历找到第一个匹配的方法返回。
+                 因此，响应方法时，后编译的分类的方法的优先级，高于先编译的分类的同名方法。
+                 */
+
                     remethodizeClass(cls);
                     classExists = YES;
                 }
@@ -3029,7 +3080,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 }
             }
 
-            // 协议、类方法、类属性添加到类的元类的class_rw_t中
+            // 元类的处理
             if (cat->classMethods  ||  cat->protocols  
                 ||  (hasClassProperties && cat->_classProperties)) 
             {

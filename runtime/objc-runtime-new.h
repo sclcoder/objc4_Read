@@ -474,12 +474,12 @@ struct protocol_list_t {
         return list + count;
     }
 };
-
+// 分类列表中的元素的类型，包含指向分类的指针
 struct locstamped_category_t {
     category_t *cat;
     struct header_info *hi;
 };
-
+// locstamped_category_list_t 数组容器是实现了分类列表
 struct locstamped_category_list_t {
     uint32_t count;
 #if __LP64__
@@ -1828,6 +1828,28 @@ struct swift_class_t : objc_class {
     }
 };
 
+/**
+ 分类是对 Objective-C 类的一种扩展方式。说到分类不可不提扩展（Extension）。扩展通常被视为匿名的分类，但是两者实现的区别还是很大的：
+
+ 扩展只是对接口的扩展，所有实现还是在类的@implementation块中，分类是对接口以及实现的扩展，分类的实现在@implementation(CategoryName)块中；
+ 分类在 Runtime 中有category_t结构体与之对应，而扩展则没有；
+ 扩展是编译时决议，分类是运行时决议，分类在运行加载阶段才载入方法列表中；
+
+
+ 注意：分类是装饰器模式。用分类扩展的好处是：对父类的扩展可以直接作用于其所有的衍生类。
+
+
+ 
+ 分类的数据结构是category_t结构体。包含了分类名称name，分类所扩展的类cls，分类实现的实例方法列表instanceMethods，分类实现的类方法列表classMethods，分类遵循的协议列表protocols，分类定义的属性列表instanceProperties。
+ 
+ 
+ 类并不包含像分类列表这样的数据结构
+ category_t结构体只是为了在编译阶段记录开发者定义的分类，并将其保存到特定的容器中。
+ 但是程序本身则需要保存分类列表，因为加载程序时，需要按照容器内记录的分类信息依次加载分类。
+ 保存应用定义的所有分类的容器是category_list，也是locstamped_category_list_t的别名。
+ locstamped_category_list_t是顺序表容器，元素为locstamped_category_t结构体。locstamped_category_t结构体包含指向category_t结构体的cat成员。
+
+ */
 
 struct category_t {
     const char *name;
