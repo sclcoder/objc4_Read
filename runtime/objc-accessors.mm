@@ -75,29 +75,29 @@ static inline void reallySetProperty(id self, SEL _cmd, id newValue, ptrdiff_t o
     }
 
     id oldValue;
-    id *slot = (id*) ((char*)self + offset);
+    id *slot = (id*) ((char*)self + offset); /// 获取旧值地址
 
     if (copy) {
-        newValue = [newValue copyWithZone:nil];
+        newValue = [newValue copyWithZone:nil];  /// 对新值执行copy
     } else if (mutableCopy) {
-        newValue = [newValue mutableCopyWithZone:nil];
+        newValue = [newValue mutableCopyWithZone:nil]; /// 对新值执行mutableCopy
     } else {
-        if (*slot == newValue) return;
-        newValue = objc_retain(newValue);
+        if (*slot == newValue) return;  /// 如果新值和旧值一样返回
+        newValue = objc_retain(newValue); /// retain新值
     }
 
-    if (!atomic) {
+    if (!atomic) { /// noatomic 不需要加锁
         oldValue = *slot;
         *slot = newValue;
-    } else {
+    } else { /// atomic 加锁处理
         spinlock_t& slotlock = PropertyLocks[slot];
         slotlock.lock();
-        oldValue = *slot;
-        *slot = newValue;        
+        oldValue = *slot;  // 保存旧值 一会释放
+        *slot = newValue;  // 将该地址内容设置为新值
         slotlock.unlock();
     }
 
-    objc_release(oldValue);
+    objc_release(oldValue); // release 旧值
 }
 
 void objc_setProperty(id self, SEL _cmd, ptrdiff_t offset, id newValue, BOOL atomic, signed char shouldCopy) 
