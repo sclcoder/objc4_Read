@@ -271,46 +271,55 @@ struct ReleaseValue {
 void _object_set_associative_reference(id object, void *key, id value, uintptr_t policy) {
     // retain the new value (if any) outside the lock.
     ObjcAssociation old_association(0, nil);
+    /// 对value进行相应的内存管理操作
     id new_value = value ? acquireValue(value, policy) : nil;
     {
         AssociationsManager manager;
-        AssociationsHashMap &associations(manager.associations());
-        disguised_ptr_t disguised_object = DISGUISE(object);
-        if (new_value) {
+        AssociationsHashMap &associations(manager.associations()); // 获取全局的AssociationsHashMap
+        disguised_ptr_t disguised_object = DISGUISE(object); /// 将其伪装一下
+        
+        if (new_value) { // 如果有新值
             // break any existing association.
-            AssociationsHashMap::iterator i = associations.find(disguised_object);
-            if (i != associations.end()) {
+            AssociationsHashMap::iterator i = associations.find(disguised_object); /// 查找disguised_object的迭代器
+            if (i != associations.end()) { // 找到disguised_object相关信息
                 // secondary table exists
-                ObjectAssociationMap *refs = i->second;
-                ObjectAssociationMap::iterator j = refs->find(key);
-                if (j != refs->end()) {
+                
+                ObjectAssociationMap *refs = i->second; // 获取disguised_object对应的ObjectAssociationMap
+                ObjectAssociationMap::iterator j = refs->find(key); // 在ObjectAssociationMap中查找是否有key对应的ObjcAssociation
+                if (j != refs->end()) { // 找到key对应的 ObjcAssociation
                     old_association = j->second;
-                    j->second = ObjcAssociation(policy, new_value);
+                    j->second = ObjcAssociation(policy, new_value); /// 将新值存入ObjcAssociation
                 } else {
+                     /// key不在ObjectAssociationMap中
+                    ///  通过新值构建ObjcAssociation，并以key为键ObjcAssociation为值，存放到ObjectAssociationMap中
                     (*refs)[key] = ObjcAssociation(policy, new_value);
                 }
-            } else {
+            } else { // 没找到disguised_object相关信息
                 // create the new association (first time).
-                ObjectAssociationMap *refs = new ObjectAssociationMap;
+                ObjectAssociationMap *refs = new ObjectAssociationMap; /// 创建ObjectAssociationMap
+                /// 以disguised_object为key，ObjectAssociationMap为值存入到全局的AssociationsHashMap中
                 associations[disguised_object] = refs;
+                /// 通过新值构建ObjcAssociation，并以key为键ObjcAssociation为值，存放到ObjectAssociationMap中
                 (*refs)[key] = ObjcAssociation(policy, new_value);
+                /// 设置对象isa中has_assoc的标记位
                 object->setHasAssociatedObjects();
             }
-        } else {
+        } else { /// 没有新值，比如传入的nil
             // setting the association to nil breaks the association.
+            /// 找到该对象对应的ObjectAssociationMap，并通过key找到ObjcAssociation,将其从ObjectAssociationMap中移除
             AssociationsHashMap::iterator i = associations.find(disguised_object);
             if (i !=  associations.end()) {
                 ObjectAssociationMap *refs = i->second;
                 ObjectAssociationMap::iterator j = refs->find(key);
                 if (j != refs->end()) {
-                    old_association = j->second;
+                    old_association = j->second; /// 保存的要擦除的值，后续进行释放
                     refs->erase(j);
                 }
             }
         }
     }
     // release the old value (outside of the lock).
-    if (old_association.hasValue()) ReleaseValue()(old_association);
+    if (old_association.hasValue()) ReleaseValue()(old_association); /// 释放要擦除的值
 }
 
 void _object_remove_assocations(id object) {
