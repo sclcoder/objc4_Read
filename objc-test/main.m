@@ -14,19 +14,22 @@
 int main(int argc, const char * argv[]) {
     @autoreleasepool { /// debug  @autoreleasepool
           NSObject *p = [[NSObject alloc] init];
+        
+        
+          
           NSObject *p2 = p; // debug retain\release
-//          __weak NSObject *p1 = p; // debug weak
+          __weak NSObject *p1 = p; // debug weak
         
         
-        SubTest *sub = [SubTest new];
+//        SubTest *sub = [SubTest new];
+////        sub.name = @"initialize";
+//
+//        TestObject *test = [TestObject new];
+//        test.name = @"layout_bitmap";
+//        test.age = 20;
+//        [test unknowSel];
+//
 //        sub.name = @"initialize";
-        
-        TestObject *test = [TestObject new];
-        test.name = @"layout_bitmap";
-        test.age = 20;
-        [test unknowSel];
-        
-        sub.name = @"initialize";
         
         
         

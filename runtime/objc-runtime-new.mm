@@ -1433,7 +1433,6 @@ static Class remapClass(Class cls)
         return c2;
     }
 }
-
 static Class remapClass(classref_t cls)
 {
     return remapClass((Class)cls);
@@ -1451,6 +1450,7 @@ Class _class_remap(Class cls)
 * or is an ignored weak-linked class.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+
 // 对Class的指针的重映射，返回时传入的clsref将 指向*clsref重映射后的类
 static void remapClassRef(Class *clsref)
 {
@@ -2431,7 +2431,10 @@ bool mustReadClasses(header_info *hi)
 
 **********************************************************************/
 
-/// 主要将读取的cls添加到全局表中
+
+/// 读取编译器编写的类和元类信息: 主要载入类的class_ro_t静态数据
+///
+/// 调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类。具体请进一步查看static Class realizeClassWithoutSwift(Class cls)函数
 Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 {
     const char *mangledName = cls->mangledName(); // mangledName:整齐的名字
@@ -2469,7 +2472,9 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 
     Class replacing = nil;
     
-    ////       future class的重映射代码        ////
+    
+    
+    ////       future class的重映射代码: 如果是懒加载的类,将重映射该类，即设置cls中的信息给future cls        ////
     
     // 1. 若该类名已被标记为future class（懒加载的类），则弹出该类名对应的future class 赋值给newCls
     if (Class newCls = popFutureNamedClass(mangledName)) {
@@ -2493,8 +2498,11 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
         const class_ro_t *old_ro = rw->ro;
         // 4. 将cls中的数据拷贝到newCls，主要是要沿用cls的isa、superclass和cache数据
         memcpy(newCls, cls, sizeof(objc_class));
-        // 5. rw记录cls的ro
-        rw->ro = (class_ro_t *)newCls->data();
+        // 5. rw记录cls的ro  此时的newCls的内容是从cls中复制过来的,newCls代表cls?
+        /**
+         注意：虽然objc_class的data()方法声明为返回class_rw_t *，但是究其本质，它只是返回了objc_class的bits成员的FAST_DATA_MASK标记的位域中保存的内存地址，该内存地址实际上可以保存任何类型的数据。在Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)函数中，传入的cls所指向的objc_class结构体有其特殊之处：cls的bits成员的FAST_DATA_MASK位域，指向的内存空间保存的是class_ro_t结构体，并不是通常的class_rw_t。
+         */
+        rw->ro = (class_ro_t *)newCls->data(); // 此时获取的是cls的ro数据
         // 6. 沿用future class的rw、cls的ro
         newCls->setData(rw);
         // 7. 释放future class的ro占用的空间 在cls映射到newCls过程中，完全丢弃了 future class 的ro数据
@@ -2510,12 +2518,29 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
         /// 上述只是对 future class 的重映射过程
         
         /****
+         综合上面代码的详细注释，可知cls重映射到newCls后，newCls的数据保留了cls中的superclass、cache成员，但是bits中指向class_rw_t结构体地址的位域（FAST_DATA_MASK）指向了新的class_rw_t结构体。该结构体的ro指针指向cls->data()所指向的内存空间中保存的class_ro_t结构体，其他数据则是直接沿用 从namedFutureClasses哈希表中弹出的 future class 的class_rw_t结构体（通过future class 的data()方法返回）中数据。
+
+                
+         
          Future class 类的有效数据实际上仅有：类名和rw。
          rw中的数据作用也非常少，仅使用flags的RO_FUTURE（实际上就是RW_FUTURE）标记类是 future class；
          
          Future class 的作用是为指定类名的类，提前分配好内存空间，调用readClass(...)函数读取类时，才正式写入类的数据。 Future class 是用于支持类的懒加载机制；
          
          具体请看static void addFutureNamedClass(const char *name, Class cls)
+         
+         
+         上述只是对 future class 的重映射过程。
+         通用的类重映射调用static class remapClass(Class cls)，注意当传入的cls类不在remappedClasses哈希表中时，直接返回cls本身；
+         static void remapClassRef(Class *clsref)可对传入的Class* clsref重映射（改变*clsref的值），返回时clsref将 指向*clsref重映射后的类。具体分析请自行查看相关代码。
+         
+         
+         通过重映射的分析最后归纳出以下结论：
+
+         Future class 重映射返回新的类，保存在remappedClasses全局哈希表中；
+         普通类重映射返回类本身；
+         重映射的真正的目的是支持类的懒加载，懒加载类暂存为 future class 只记录类名及 future class 属性，在调用readClass才正式载入类数据。
+         
          **/
     }
     

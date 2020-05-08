@@ -24,6 +24,7 @@
 - (void)other
 {
     NSLog(@"%s", __func__);
+    NSObject *obj = [NSObject new];
 }
 
 
