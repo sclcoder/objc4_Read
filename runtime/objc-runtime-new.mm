@@ -1951,7 +1951,7 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
 **********************************************************************/
 static Class realizeClass(Class cls)
 {
-    
+    // 对类cls进行首次初始化，包括分配其读写数据。返回该类的真实类结构。
     /**
      调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类。具体包括：
 
@@ -1999,12 +1999,14 @@ static Class realizeClass(Class cls)
     } else {
         // Normal class. Allocate writeable class data.
         // 普通类，则需要为rw分配内存，并将ro指针指向 传入的cls->data()所指向的内存空间
+        // 1.配置class_rw_t的RW_REALIZED、RW_REALIZING位；
         rw = (class_rw_t *)calloc(sizeof(class_rw_t), 1);
         rw->ro = ro;
         rw->flags = RW_REALIZED|RW_REALIZING;
         cls->setData(rw);
     }
 
+    // 2.根据class_ro_t的RO_META位的值，配置class_rw_t的version；
     isMeta = ro->flags & RO_META;
 
     rw->version = isMeta ? 7 : 0;  // old runtime went up to 6
@@ -2024,9 +2026,8 @@ static Class realizeClass(Class cls)
     // This needs to be done after RW_REALIZED is set above, for root classes.
     // This needs to be done after class index is chosen, for root metaclasses.
     
-    // 父类realizing
+    // 3.因为静态载入的父类、元类有可能被重映射，因此要保证类的父类、元类完成class realizing；
     supercls = realizeClass(remapClass(cls->superclass));
-    // 元类realizing
     metacls = realizeClass(remapClass(cls->ISA()));
 
     // 配置RW_REQUIRES_RAW_ISA位。可忽略。
@@ -2067,14 +2068,17 @@ static Class realizeClass(Class cls)
 #endif
 
     // Update superclass and metaclass in case of remapping
-    // 由于存在class remapping的可能性，因此需要更新父类及元类
+    // 4.配置class_rw_t的superclass；
+    // 5.初始化objc_class的isa指针；
     cls->superclass = supercls;
     cls->initClassIsa(metacls);
 
     // Reconcile(调和) instance variable offsets / layout.
     // This may reallocate class_ro_t, updating our ro variable.
+    
+    // 调整ivarLayout
+    /// 6.配置ivarLayout、instanceSize、instanceStart。该步骤非常重要，新版本 runtime 支持 non-fragile instance variables，类的instanceStart、instanceSize会根据父类的instanceSize动态调整，且需要按 WORD 对齐（字长:CUP读取数据的内存单位）；
 
-    // 调整ivarLayout --- 类的成员变量内存布局调整 non-fragile instance variables技术
     if (supercls  &&  !isMeta) reconcileInstanceVariables(cls, supercls, ro);
 
     // Set fastInstanceSize if it wasn't set already.
@@ -2082,7 +2086,7 @@ static Class realizeClass(Class cls)
     cls->setInstanceSize(ro->instanceSize);
 
     // Copy some flags from ro to rw
-    // 忽略
+    // 7.配置class_rw_t的RO_HAS_CXX_STRUCTORS、RO_HAS_CXX_DTOR_ONLY
     if (ro->flags & RO_HAS_CXX_STRUCTORS) {
         cls->setHasCxxDtor();
         if (! (ro->flags & RO_HAS_CXX_DTOR_ONLY)) {
@@ -2091,7 +2095,7 @@ static Class realizeClass(Class cls)
     }
 
     // Connect this class to its superclass's subclass lists
-    // 添加子类/根类
+    // 8.添加子类/根类
     if (supercls) {
         addSubclass(supercls, cls);
     } else {
@@ -2102,6 +2106,8 @@ static Class realizeClass(Class cls)
     // Attach categories
     // rw中需要保存ro中的一些数据，例如ro中的基础方法列表、属性列表、协议列表
     // rw还需要载入分类的方法列表
+    
+    // 9.将class_ro_t中的基本方法列表、属性列表、协议列表，类的分类（category）中的方法列表等信息添加到class_rw_t中
     methodizeClass(cls);
 
     return cls;
@@ -2434,7 +2440,7 @@ bool mustReadClasses(header_info *hi)
 
 /// 读取编译器编写的类和元类信息: 主要载入类的class_ro_t静态数据
 ///
-/// 调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类。具体请进一步查看static Class realizeClassWithoutSwift(Class cls)函数
+/// 调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类。具体请进一步查看static Class realizeClass(Class cls)函数
 Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 {
     const char *mangledName = cls->mangledName(); // mangledName:整齐的名字
@@ -5303,10 +5309,10 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     
     runtimeLock.assertUnlocked();
     
-    // 1.一般的消息查找
+    // 一、消息查找流程
+    // 1.在类的方法缓冲中搜索方法，搜索到则立刻返回；
     // Optimistic cache lookup
     if (cache) {
-        // 在方法缓冲中搜索方法
         imp = cache_getImp(cls, sel);
         if (imp) return imp;
     }
@@ -5323,18 +5329,20 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     runtimeLock.lock();
     checkIsKnownClass(cls);
 
-    // 方法固定相关操作
+    //  2.判断类是否已完成 class realizing，若未完成，则先进行 class realizing，因为在class realizing 完成之前，类的class_rw_t中的方法列表都有可能是不完整的；
+    
     if (!cls->isRealized()) {
         realizeClass(cls);
     }
 
-    // 若类的initialize()方法未调用，则先进行类的initialize初始化过程
-    
+    // 3.若类未初始化，则先执行类的initialize()方法，因为其中可能包含动态添加方法逻辑；
+
     if (initialize  &&  !cls->isInitialized()) {
         runtimeLock.unlock();
         
         // initialize()方法 在第一次调用类的方法时，在lookUpImpOrForward(...)中检查类是否初始化时触发，因此若父类实现了initialize()方法，
         // 但是其所有子类均未实现，则无论是第一次调用子类还是父类的方法，都会触发父类的initialize()方法。
+        
         _class_initialize (_class_getNonMetaClass(cls, inst)); // 调用类的initialize()方法
         runtimeLock.lock();
         
@@ -5350,12 +5358,15 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
     // Try this class's cache.
     // 在类的cache_t方法缓存哈希表中查询SEL对应的IMP
+    // 4.再次在类的方法缓冲中搜索方法，搜索到则立刻返回，因为都可能触发方法缓冲更新
     imp = cache_getImp(cls, sel);
     if (imp) goto done;
 
     // Try this class's method lists.
     {
         // 在类的method_array_t方法列表容器中查询SEL对应的IMP
+        // 5.遍历类的method_array_t方法列表二维数组容器中的所有method_list_t，在method_list_t中搜索方法。若method_list_t已排序，
+        // 则使用二分法搜索，若method_list_t未排序，则用简单线性搜索。搜索到则立刻返回；
         Method meth = getMethodNoSuper_nolock(cls, sel);
         if (meth) {
             log_and_fill_cache(cls, meth->imp, sel, inst, cls);
@@ -5366,7 +5377,7 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
     // Try superclass caches and method lists.
     {
-    // 沿着类的继承链循环。在各级类及父类的方法缓冲、方法列表容器中查询SEL对应的IMP
+    // 6.沿着类的继承链在父类中递归地搜索方法。在各级类及父类的方法缓冲、方法列表容器中查询SEL对应的IMP
         unsigned attempts = unreasonableClassCount();
         for (Class curClass = cls->superclass;
              curClass != nil;
@@ -5411,7 +5422,9 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
 
     // No implementation found. Try method resolver once.
     
-    // 2.没有找到IMP, 走‘一次’动态方法解析 在动态解析中调用lookUpImpOrForward(...)中resolver设置为NO,所以只会走一次动态解析
+     // 二、方法动态解析流程
+    // 7.尝试方法动态解析，回到第4步再次尝试搜索；
+    // 没有找到IMP, 走‘一次’动态方法解析 在动态解析中调用lookUpImpOrForward(...)中resolver设置为NO,所以只会走一次动态解析
     if (resolver  &&  !triedResolver) {
         runtimeLock.unlock();
         
@@ -5432,8 +5445,10 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
     // No implementation found, and method resolver didn't help. 
     // Use forwarding.
 
-    // 3.触发消息转发流程
-    // 找不到IMP且动态方法解析没有其作用,走消息转发 （消息转发没开源只能看汇编）
+    // 三、触发消息转发流程
+    // 找不到IMP且动态方法解析没有起作用,走消息转发 （消息转发没开源只能看汇编）
+    
+    // 8.若方法动态解析没其作用，则触发消息转发流程。返回_objc_msgForward_impcache，返回该IMP表示需要进入消息转发流程；
 
     imp = (IMP)_objc_msgForward_impcache;
     cache_fill(cls, sel, imp, inst);
@@ -7013,7 +7028,14 @@ objc_constructInstance(Class cls, void *bytes)
 * fixme
 * Locking: none
 **********************************************************************/
+/**
+ 对象的构建过程
 
+ 对象的构建本质上都通过调用_class_createInstanceFromZone(...)函数实现，
+ 其中最关键的传入参数是Class类型的cls，含义是构建类为cls的对象。代码看起来挺长，实际上仅包含两个操作：
+    1.为对象分配cls->instanceSize()大小的内存空间
+    2.构建对象的isa
+ */
 static __attribute__((always_inline)) 
 id
 _class_createInstanceFromZone(Class cls, size_t extraBytes, void *zone, 
@@ -7021,7 +7043,6 @@ _class_createInstanceFromZone(Class cls, size_t extraBytes, void *zone,
                               size_t *outAllocatedSize = nil)
 {
     if (!cls) return nil;
-    /// Realized需要深入研究!!!
     assert(cls->isRealized());
 
     // Read class's info bits all at once for performance
@@ -7191,7 +7212,8 @@ object_dispose(id obj)
 {
     if (!obj) return nil;
     /// 内部会执行C++析构(沿着继承链析构)、移除关联对象、该对象所在sidetable中引用计数和弱引用相关清理工作
-    objc_destructInstance(obj);    
+    objc_destructInstance(obj);
+    // 释放对象占用内存
     free(obj);
 
     return nil;

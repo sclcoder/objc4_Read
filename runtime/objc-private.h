@@ -707,8 +707,10 @@ extern IMP _imp_implementationWithBlockNoCopy(id block);
 
 /**
  Runtime 中用layout_bitmap结构体表示压缩前的ivarLayout，保存的是一个二进制数，
- 二进制数每一位标记类的成员变量空间（instanceStart为起始instanceSize大小的内存空间）中，对应位置的 WORD 是否存储了id类型成员变量。
-    例如，二进制数0101表示成员第二个、第四个成员变量是id类型。layout_bitmap包含以下成员：
+ 二进制数每一位标记类的成员变量空间（instanceStart为起始instanceSize大小的内存空间）中，
+ 对应位置的 WORD 是否存储了id类型成员变量。
+
+ 例如，二进制数0101表示成员第二个、第四个成员变量是id类型。layout_bitmap包含以下成员：
  */
 // layout.h
 typedef struct {

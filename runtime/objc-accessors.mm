@@ -50,6 +50,17 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
         return object_getClass(self);
     }
 
+    /**
+     调用objc_getProperty(...)获取对象的属性值，实际上只是按一定的方式访问了属性对应的成员变量空间。
+     若属性为atomic则会在获取属性值的代码两头添加spinlock_t的加锁解锁代码，这也是atomic和nonatomic的区别所在。
+     
+     
+     注意：spinlock_t的本质是os_lock_handoff_s锁，关于这个锁网上找不到什么资料，推测是个互斥锁。注意spinlock_t并不是OSSpinLock。OSSpinLock已知存在性能问题，已经被弃用。
+     
+     
+     获取属性值对copy类型没有做相关处理，也就是说----copy属性的getter返回的也是属性指向对象本身，copy属性的getter并不包含拷贝操作。
+     */
+    
     // Retain release world
     id *slot = (id*) ((char*)self + offset);
     if (!atomic) return *slot;
@@ -57,11 +68,11 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
     // Atomic retain release world
     spinlock_t& slotlock = PropertyLocks[slot];
     slotlock.lock();
-    id value = objc_retain(*slot);
+    id value = objc_retain(*slot); // 引用计数+1
     slotlock.unlock();
     
     // for performance, we (safely) issue the autorelease OUTSIDE of the spinlock.
-    return objc_autoreleaseReturnValue(value);
+    return objc_autoreleaseReturnValue(value); // 添加到自动释放池
 }
 
 
@@ -98,8 +109,21 @@ static inline void reallySetProperty(id self, SEL _cmd, id newValue, ptrdiff_t o
     }
 
     objc_release(oldValue); // release 旧值
+    
+    /// 注意：存取属性值的实现是直接调用属性的getter、setter的对应的方法的SEL触发的，属性与方法的关联细节则没有公布源代码。
+
 }
 
+/**
+ 调用objc_setProperty(...)设置对象的属性值，同样是是按一定的方式访问属性对应的成员变量空间。
+ 同样，若属性为atomic则会在设置属性值的代码两头添加spinlock_t的加锁解锁代码。
+ 若属性为copy时，则将传入 setter 的参数指向的对象 拷贝到对应的成员变量空间。
+
+ 作者：Luminix
+ 链接：https://juejin.im/post/5da491d95188252f051e24e1
+ 来源：掘金
+ 
+ */
 void objc_setProperty(id self, SEL _cmd, ptrdiff_t offset, id newValue, BOOL atomic, signed char shouldCopy) 
 {
     bool copy = (shouldCopy && shouldCopy != MUTABLE_COPY);

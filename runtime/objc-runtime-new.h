@@ -180,7 +180,8 @@ struct entsize_list_tt {
     iterator end() { 
         return iterator(*static_cast<const List*>(this), count); 
     }
-
+    
+    /// 自定义迭代器
     struct iterator {
         uint32_t entsize;
         uint32_t index;  // keeping track of this saves a divide in operator-
@@ -211,6 +212,15 @@ struct entsize_list_tt {
             , element(&list.getOrEnd(start))
         { }
 
+        /**
+         重载运算符
+         重载的运算符是带有特殊名称的函数，函数名是由关键字 operator 和其后要重载的运算符符号构成的。与其他函数一样，重载运算符有一个返回类型和一个参数列表。
+
+         Box operator+(const Box&);
+
+         声明加法运算符用于把两个 Box 对象相加，返回最终的 Box 对象。
+         */
+        
         const iterator& operator += (ptrdiff_t delta) {
             element = (Element*)((uint8_t *)element + delta*entsize);
             index += (int32_t)delta;
@@ -849,7 +859,7 @@ class list_array_tt {
     // 定义二维数组的外层一维数组容器
     struct array_t {
         uint32_t count; // 外层一维数组存储元素数量
-        List* lists[0]; // 内层一维数组容器
+        List* lists[0]; // 内层一维数组容器，元素为指向容器列表的指针，因此array_t的本质是二维数组
 
         static size_t byteSize(uint32_t count) {
             return sizeof(array_t) + count*sizeof(lists[0]);
@@ -865,7 +875,8 @@ class list_array_tt {
         List **lists; // 当前迭代到的数组的位置
         List **listsEnd; // 二维数组的外层容器的结尾；
         typename List::iterator m, mEnd; // m:当前迭代到的数组中的元素的位置；mEnd:当前迭代到的数组的结尾；
-        // 内嵌迭代器的定义
+        // 注意：构建list_array_tt的迭代器时，只能从方法列表到方法列表，不能从容器中的方法列表的某个元素的迭代器开始迭代。
+        
      public:
         // 构建从begin指向的列表，到end指向的列表的迭代器
         iterator(List **begin, List **end) 
@@ -1013,7 +1024,7 @@ class list_array_tt {
 
     /****
 
-     attachLists(...)：将列表元素添加到二维数组容器的开头，注意到list_array_t没有定义构造函数，
+     attachLists(...)：将列表元素添加到二维数组容器的开头，注意到list_array_tt没有定义构造函数，
      这是因为构造逻辑均在attachLists(...)中，包含容器从空转化为保存一位数组，再转化为保存二维数组的处理逻辑；
      
      tryFree()：释放二维数组容器占用内存；
@@ -1060,7 +1071,7 @@ class list_array_tt {
             setArray((array_t *)malloc(array_t::byteSize(newCount)));
             
             array()->count = newCount;
-            /// 将数据存在array的一个lists中
+            /// 将数据存在array的末尾
             if (oldList) array()->lists[addedCount] = oldList;
             
             memcpy(array()->lists, addedLists, 

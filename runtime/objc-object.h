@@ -433,7 +433,15 @@ objc_object::clearDeallocating()
     assert(!sidetable_present());
 }
 
+/**
+ 对象的析构
+ 对象的析构调用对象的rootDealloc()方法，源代码虽然不很多但是整个过程经过了几个函数。总结对象析构所需要的操作如下：
 
+ 释放对关联对象的引用；
+ 清空 side table 中保存的该对象弱引用地址、对象引用计数等内存管理数据；
+ 释放对象占用的内存；
+
+ */
 inline void
 objc_object::rootDealloc()
 {
@@ -447,7 +455,7 @@ objc_object::rootDealloc()
                  !isa.has_sidetable_rc))
     {
         assert(!sidetable_present());
-        free(this);  /// 释放该对象
+        free(this);  /// 释放对象占用内存
     } 
     else {
         /// 内部会执行C++析构、移除关联对象、该对象所在sidetable中引用计数和弱引用相关清理工作

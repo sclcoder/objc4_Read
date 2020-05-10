@@ -684,6 +684,8 @@ static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
       同时会加载到cache_t缓存中,这样下次调用SEL时可直接从cache_t中查询到IMP
       
      注意: 再次调用 lookUpImpOrNil(...); 时 resolver 设置为 NO,保证动态解析只走一次。 因为会有这样的场景: 只实现了resolveInstanceMethod方法并返回YES,但是并没有在该方法中动态添加IMP。此时设置resolver=NO可以避免死循环,从而走消息转发逻辑。
+     
+     注意：完成动态解析后，又立即调用了lookUpImpOrNil(...)，其目的是将resolveInstanceMethod、resolveClassMethod方法实现代码中为响应SEL而动态添加的IMP加入到类的方法缓冲，则下一次调用可直接从方法缓冲中获取。
      */
     IMP imp = lookUpImpOrNil(cls, sel, inst, 
                              NO/*initialize*/, YES/*cache*/, NO/*resolver*/);

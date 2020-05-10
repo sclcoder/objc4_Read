@@ -268,7 +268,8 @@ static void move_bits(layout_bitmap bits, size_t src, size_t dst,
 #endif
 
 /**
- 调用decompress_layout(...)解压缩ivarLayout，为压缩的逆过程。例如，增加成员变量时需要更新ivarLayout，此时需要先解压ivarLayout的十六进制数得到layout_bitmap，然后更新layout_bitmap数据，最后压缩layout_bitmap得到十六进制数保存到ivarLayout。
+ 调用decompress_layout(...)解压缩ivarLayout，为压缩的逆过程。
+ 例如，增加成员变量时需要更新ivarLayout，此时需要先解压ivarLayout的十六进制数得到layout_bitmap，然后更新layout_bitmap数据，最后压缩layout_bitmap得到十六进制数保存到ivarLayout。
 
  作者：Luminix
  链接：https://juejin.im/post/5da2a0f2e51d45780e4cea1c
