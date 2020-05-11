@@ -548,7 +548,8 @@ static void addUnattachedCategoryForClass(category_t *cat, Class cls,
     // DO NOT use cat->cls! cls may be cat->cls->isa instead
     NXMapTable *cats = unattachedCategories();
     category_list *list;
-
+    
+    // locstamped_category_list_t为category_list的真实类型，是一个顺序表容器
     list = (category_list *)NXMapGet(cats, cls);
     if (!list) {
         list = (category_list *)
@@ -851,7 +852,7 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
     }
 
     auto rw = cls->data();
-    // 添加分类的方法列表 到类  rw->methods.attachLists
+    // 添加分类的方法列表到类中  通过调用rw->methods.attachLists()方法
     prepareMethodLists(cls, mlists, mcount, NO, fromBundle);
     rw->methods.attachLists(mlists, mcount);
     free(mlists);
@@ -2535,9 +2536,8 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
          
          具体请看static void addFutureNamedClass(const char *name, Class cls)
          
-         
          上述只是对 future class 的重映射过程。
-         通用的类重映射调用static class remapClass(Class cls)，注意当传入的cls类不在remappedClasses哈希表中时，直接返回cls本身；
+            通用的类重映射调用static class remapClass(Class cls)，注意当传入的cls类不在remappedClasses哈希表中时，直接返回cls本身；
          static void remapClassRef(Class *clsref)可对传入的Class* clsref重映射（改变*clsref的值），返回时clsref将 指向*clsref重映射后的类。具体分析请自行查看相关代码。
          
          
@@ -3089,6 +3089,13 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 ||  cat->instanceProperties) 
             {
                 // 调用addUnattachedCategoryForClass(...)将分类添加到扩展类的待处理分类哈希表，
+                
+                /**
+                 addUnattachedCategoryForClass(cat, cls, hi)尚未将方法列表、属性列表等信息添加到所扩展类的class_rw_t中 的分类，统一保存在一个静态的NXMapTable类的哈希表中。
+                 该哈希表以Class作为关键字，category_list为值。通过unattachedCategories()获取该哈希表。
+                 (category_list *)NXMapGet(unattachedCategories(), cls)表示获取类cls的未处理分类列表，
+                 需要对cls添加未处理分类时，将其添加到类的未处理分类列表的结尾。
+                 */
                 addUnattachedCategoryForClass(cat, cls, hi);
                 
                 // 必须保证 class realizing 已完成，因为`class_ro_t`信息固定后才能开始配置`class_rw_t`中的信息

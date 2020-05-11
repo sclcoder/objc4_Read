@@ -337,6 +337,9 @@ objc_retain_autorelease(id obj)
 }
 
 /// 与引用计数相关
+/**
+ NSObject.mm文件中，void objc_storeStrong(id *location, id obj)函数用于将obj对象的引用存储于location地址，实质上则是将obj的地址存储到location地址，注意调用了objc_retain(obj)增加了obj对象的引用计数，原来存储于location地址的对象prev则调用objc_release将其释放。
+ */
 void
 objc_storeStrong(id *location, id obj)
 {
@@ -1587,15 +1590,30 @@ objc_object::sidetable_addExtraRC_nolock(size_t delta_rc)
   
     size_t oldRefcnt = refcntStorage;
     // isa-side bits should not be set here
+    // SIDE_TABLE_DEALLOCATING或SIDE_TABLE_WEAKLY_REFERENCED时不调用该方法
     assert((oldRefcnt & SIDE_TABLE_DEALLOCATING) == 0);
     assert((oldRefcnt & SIDE_TABLE_WEAKLY_REFERENCED) == 0);
 
     /// 63                    62 .. 计数部分 .. 2          1                          0
     /// SIDE_TABLE_RC_PINNED  ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
     /// value中最高位为1说明sidetable也存放不下了
+
+    /// SIDE_TABLE_RC_PINNED是将 SideTable 中的对象的引用计数的64位数据的最高位作为对象引用计数上溢出的标记，是MSB，引用计数上溢出时，
+    /// 对象的retain、release操作不会改变引用计数位域的值。
     if (oldRefcnt & SIDE_TABLE_RC_PINNED) return true;
 
+
+
     uintptr_t carry;
+    /**
+     addc(uintptr_t lhs, uintptr_t rhs, uintptr_t carryin, uintptr_t *carryout)
+     实际调用了__builtin_addcl(lhs, rhs, carryin, carryout)函数，
+     实现功能为：计算lhs + rhs + carryin，若64bit上溢出则在输出指针carryout中写入1，
+     
+     例如：
+     uintptr_t result = __builtin_addcl((1ULL<<63), (1ULL<<62), ((1ULL<<62) + 2), &carry)，结果为result = 2，carry = 1，结果上溢出;
+     __builtin_addcl((1ULL<<63), (1ULL<<62), (1ULL<<61), &carry)，输出carry为0，结果不上溢出；
+     */
     size_t newRefcnt = 
         addc(oldRefcnt, delta_rc << SIDE_TABLE_RC_SHIFT, 0, &carry); /// 更新引用计数
     if (carry) { /// 溢出了
@@ -1655,9 +1673,12 @@ objc_object::sidetable_getExtraRC_nolock()
 id
 objc_object::sidetable_retain()
 {
+
+    // sidetable_tryRetain()中相同的预编译语句具有同样的含义，即sidetable_retain ()只针对使用指针类型的isa的对象。
 #if SUPPORT_NONPOINTER_ISA
     assert(!isa.nonpointer);
 #endif
+        
     SideTable& table = SideTables()[this];
     
     table.lock();
@@ -1679,9 +1700,9 @@ objc_object::sidetable_retain()
          #define SIDE_TABLE_RC_ONE            (1UL<<2)  // MSB-ward of deallocating bit
          #define SIDE_TABLE_RC_PINNED         (1UL<<(WORD_BITS-1))
          
-         63                    62 .. 计数部分 .. 2          1                          0
-         SIDE_TABLE_RC_PINNED  ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
-         value中最高位为1说明sidetable也存放不下了
+         63                                  62 .. 计数部分 .. 2          1                          0
+         SIDE_TABLE_RC_PINNED                ....................        SIDE_TABLE_DEALLOCATING    SIDE_TABLE_WEAKLY_REFERENCED
+    value中最高位为1说明sidetable也存放不下了
     */
     if (! (refcntStorage & SIDE_TABLE_RC_PINNED)) { /// 可以存储这个数
         refcntStorage += SIDE_TABLE_RC_ONE; /// 引用计数+1,引用计数的值从第二位开始存储的,第0位和第1位有其他定义
@@ -1695,12 +1716,26 @@ objc_object::sidetable_retain()
 bool
 objc_object::sidetable_tryRetain()
 {
+    /**
+     最不起眼的前三行预编译代码实际有提供关键信息，预编译判断如果支持非指针类型isa，则禁止使用非指针类型isa的对象执行tryRetain，
+     即tryRetain只针对使用指针类型的isa的对象（refCount信息只存储于SideTable中的对象）
+     */
 #if SUPPORT_NONPOINTER_ISA
-    assert(!isa.nonpointer);
+    assert(!isa.nonpointer); /// isa是纯指针才会执行后续代码 （断言为真则正常运行，假则停止）
 #endif
     
+    /// 此处的引用计数全部存放在sidetable中
+    
+    /**
+     调用SideTables()静态方法，获取管理SideTable的StripedMap，再以对象this为关键字获取对象所对应的SideTable 记为table，table.refcnts为 SideTable 的内存计数表，以this为关键字获取当前对象的内存计数refcntStorage
+     
+     注意指针isa模式下SideTable中保存数据的位域机构和isa.bits不一样：
+        SideTable中从最低位起第1位SIDE_TABLE_WEAKLY_REFERENCED标记是否若引用，
+        第2位SIDE_TABLE_DEALLOCATING标记对象是否已析构，
+        从第3位开始保存引用计数refCount，因此内存计数递增使用的增量是SIDE_TABLE_RC_ONE即0x04
+     */
     SideTable& table = SideTables()[this];
-
+ 
     // NO SPINLOCK HERE
     // _objc_rootTryRetain() is called exclusively by _objc_loadWeak(), 
     // which already acquired the lock on our behalf.
@@ -1712,13 +1747,13 @@ objc_object::sidetable_tryRetain()
     // }
 
     bool result = true;
-    RefcountMap::iterator it = table.refcnts.find(this);
-    if (it == table.refcnts.end()) { /// Side table中引用计数为0
+    RefcountMap::iterator it = table.refcnts.find(this); /// 查看是否记录过this的引用计数
+    if (it == table.refcnts.end()) { /// 没有记录过，则记录
         table.refcnts[this] = SIDE_TABLE_RC_ONE;
-    } else if (it->second & SIDE_TABLE_DEALLOCATING) {
+    } else if (it->second & SIDE_TABLE_DEALLOCATING) { /// 对于标记为已析构的对象，调用retain不做关于对象引用计数的任何操作
         result = false;
-    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) {
-        it->second += SIDE_TABLE_RC_ONE;
+    } else if (! (it->second & SIDE_TABLE_RC_PINNED)) { /// 没有溢出
+        it->second += SIDE_TABLE_RC_ONE; /// 应用计数+1,引用计数的值从第二位开始存储的,第0位和第1位有其他定义
     }
     
     return result;
@@ -1831,10 +1866,10 @@ objc_object::sidetable_release(bool performDealloc)
     
     RefcountMap::iterator it = table.refcnts.find(this);
     if (it == table.refcnts.end()) { /// 没有找到对应的引用计数
-        do_dealloc = true;
+        do_dealloc = true; /// 标记销毁
         table.refcnts[this] = SIDE_TABLE_DEALLOCATING; /// 设置SIDE_TABLE_DEALLOCATING标记为1 其他位全置为0
     } else if (it->second < SIDE_TABLE_DEALLOCATING) { /// 判断引用计数是否为0
-        /// 如果小于SIDE_TABLE_DEALLOCATING,只有00000001(有弱引用)或者00000000,两种情况下,引用计数都为0,所以需要将do_dealloc置为0
+        /// 如果小于SIDE_TABLE_DEALLOCATING,只有00000001(有弱引用)或者00000000,两种情况下,引用计数都为0,所以需要将do_dealloc置为true
         /// SIDE_TABLE_WEAKLY_REFERENCED may be set. Don't change it.
         do_dealloc = true;
         it->second |= SIDE_TABLE_DEALLOCATING;          /// 设置SIDE_TABLE_DEALLOCATING标记为1 SIDE_TABLE_WEAKLY_REFERENCED标记不变
@@ -1842,6 +1877,7 @@ objc_object::sidetable_release(bool performDealloc)
         it->second -= SIDE_TABLE_RC_ONE;   /// 计数-1
     }
     table.unlock();
+    
     if (do_dealloc  &&  performDealloc) {
         /// 向对象发送dealloc消息
         ((void(*)(objc_object *, SEL))objc_msgSend)(this, SEL_dealloc);
@@ -1882,7 +1918,22 @@ id
 objc_retain(id obj)
 {
     if (!obj) return obj;
+    /**
+      isTaggedPointer()方法用于判定obj是否为tagged pointer。
+      
+      对于一个对象引用（指针），一般情况下该引用的值为对象的内存地址，而tagged pointer则直接在地址中写入对象的类和数据。
+      
+      Tagged pointer使用1 bit标记引用是否为Tagged pointer，Objective-C中为指定最低位；使用3 bit标记对象的类，剩余60bit用于存储对象的value；
+      
+      注意，如果obj是tagged pointer，由于其中已经保存了对象的类型和值，因此若 retain 一个 tagged pointer 则直接返回 tagged pointer 自身，不增加引用计数。
+      
+
+
+      */
     if (obj->isTaggedPointer()) return obj; /// 是否是taggedPointer
+    
+    // objc_retain(id obj)方法调用了retain()方法，retain()方法中的hasCustomRR()方法用于判定对象是否有自定义的retain函数指针，
+    // 否则调用rootRetain()
     return obj->retain(); /// 计数器+1
 }
 

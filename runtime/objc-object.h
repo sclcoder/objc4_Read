@@ -517,13 +517,18 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 
     do {
         transcribeToSideTable = false;
+        /**
+         LoadExclusive(uintptr_t *src)直接返回*src，即src指针指向的内容。
+         代码中oldisa = LoadExclusive(&isa.bits)看起来是oldisa加载了isa.bits，但是由于isa.bits数据实际上就是isa的数据，
+         因此oldisa实质上是加载了isa，写成oldisa = (isa_t)LoadExclusive(&isa.bits)可以更好理解
+         */
         oldisa = LoadExclusive(&isa.bits); /// 将isa_t提取出来
         newisa = oldisa;
         if (slowpath(!newisa.nonpointer)) {  /// 小概率执行此处代码: 是未经优化的isa概率很小
             
             /// 如果是未经过优化的isa那么直接使用sidetable记录引用计数
-            ClearExclusive(&isa.bits);
             
+            ClearExclusive(&isa.bits);
             if (!tryRetain && sideTableLocked) sidetable_unlock(); /// sideTable解锁
             
             if (tryRetain) return sidetable_tryRetain() ? (id)this : nil;
@@ -532,17 +537,27 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
         }
         
         
-        // 对于标记为已析构的对象，调用retain不做关于对象引用计数的任何操作。
         // don't check newisa.fast_rr; we already called any RR overrides
         if (slowpath(tryRetain && newisa.deallocating)) { /// 小概率执行此处代码
             ClearExclusive(&isa.bits);
             if (!tryRetain && sideTableLocked) sidetable_unlock();
+            // 对于标记为已析构的对象，调用retain不做关于对象引用计数的任何操作。
             return nil;
         }
     
+        
         // 采用了isa优化，做extra_rc++，同时检查是否extra_rc溢出，若溢出，则extra_rc减半，并将另一半转存至sidetable
+        
         uintptr_t carry;
         
+        /**
+         addc(uintptr_t lhs, uintptr_t rhs, uintptr_t carryin, uintptr_t *carryout)
+         实际调用了__builtin_addcl(lhs, rhs, carryin, carryout)函数，
+         实现功能为：计算lhs + rhs + carryin，若64bit上溢出则在输出指针carryout中写入1，
+         例如：
+            uintptr_t result = __builtin_addcl((1ULL<<63), (1ULL<<62), ((1ULL<<62) + 2), &carry)，结果为result = 2，carry = 1，结果上溢出；
+            __builtin_addcl((1ULL<<63), (1ULL<<62), (1ULL<<61), &carry)，输出carry为0，结果不上溢出；
+         */
         /// # define RC_ONE (1ULL<<45) isa_t结构中的第45位到63位(从0位开始)记录引用计数的值
         newisa.bits = addc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc++
         
@@ -575,6 +590,7 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
          StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)实际调用了__sync_bool_compare_and_swap((void **)dst, (void *)oldvalue, (void *)value)
          实现功能为：比较oldvalue和dst指针指向的值，若两者相等则将value写入dst指针的内容且返回true，否则不写入且返回false；
          */
+        
         /// 将oldisa 替换为 newisa，并赋值给isa.bits(更新isa_t), 如果不成功，do while再试一遍
     } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)));
     
@@ -693,6 +709,8 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
         if (borrowed > 0) {
             // Side table retain count decreased.
             // Try to add them to the inline count.
+            
+            // 为什么是newisa.extra_rc = borrowed - 1，这是因为前面newisa = oldisa将newisa恢复到递减前的状态，因此要对其作重新减1处理。
             newisa.extra_rc = borrowed - 1;  // redo the original decrement too 计数减一
             bool stored = StoreReleaseExclusive(&isa.bits, 
                                                 oldisa.bits, newisa.bits);
