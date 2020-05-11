@@ -803,7 +803,7 @@ struct magic_t {
     
 /***
  
- 此处指看了关于AutoreleasePoolPage的源码,AutoreleasePoolPage与RunLoop也有密切的关系,这部分内容需要看RunLoop的源码
+ 此处只是看了关于AutoreleasePoolPage的源码,AutoreleasePoolPage与RunLoop也有密切的关系,这部分内容需要看RunLoop的源码
  
  Autorelease pool 与 RunLoop 也有非常紧密的关系。App 启动后再主线程 RunLoop 会注册两个 Observer
  第一个 Observer 监听 Entry 事件，其回调会调用objc_autoreleasePoolPush()函数创建自动释放池；
@@ -814,9 +814,31 @@ struct magic_t {
  注意:
  1.runloop自动创建自动释放池
  2.手动创建 @autoreleasepool{ \\添加需要自动释放的对象  }
- 
+
  ***/
 
+
+/**
+    A thread's autorelease pool is a stack of pointers.
+    Each pointer is either an object to release, or POOL_SENTINEL which is
+    an autorelease pool boundary.
+    A pool token is a pointer to the POOL_SENTINEL for that pool. When
+    the pool is popped, every object hotter than the sentinel is released.
+    The stack is divided into a doubly-linked list of pages. Pages are added
+    and deleted as necessary.
+    Thread-local storage points to the hot page, where newly autoreleased
+    objects are stored.
+ 
+ 
+    其表达的要点如下：
+     1.线程的 autorelease pool 的实质是指针的堆栈，autorelease pool 是与线程关联的；
+     2.Autorelease pool 中的指针要么指向需要release的对象，要么是POOL_SENTINEL，POOL_SENTINEL是 autorelease pool 的边界；
+     3.Autorelease pool 的 token是指向 autorelease pool 自身的POOL_SENTINEL的指针。当autorelease pool释放时，会释放所有比 tokenhotter更“热”的对象；
+     4.Autorelease pool 中，指针的堆栈被划分到 分页中，分页使用双向链表的数据结构关联，分页可按需添加或删除；
+     线程本地存储指向hot page“热”分页，“热”分页保存最新的 autorelease 的对象。
+
+ 
+ */
 
 class AutoreleasePoolPage 
 {
@@ -942,7 +964,7 @@ class AutoreleasePoolPage
 
 
     id * begin() {
-        /// 获取开始存放autorelrese对象的地址
+        /// 获取开始存放autorelrese对象的地址 sizeof(*this)获取的大小是56Byte
         return (id *) ((uint8_t *)this+sizeof(*this));
     }
 
@@ -978,36 +1000,52 @@ class AutoreleasePoolPage
 
     void releaseAll() 
     {
-        releaseUntil(begin());/// 释放到链表的头结点
+        releaseUntil(begin());/// 释放到当前page存储堆栈的开始处
     }
 
+    
+    /**
+     void releaseUntil(id *stop)实例方法用于释放AutoreleasePoolPage中，比*stop更晚推入堆栈空间的所有 autorelease object。
+     步骤如下：
+         1.在this->next到达stop之前，进行以下迭代；
+         2.找到 hotPage，若 hotPage为空（hotPage为空可能是步骤3导致的），则沿parent指针一直回溯找到第一个非空的AutoreleasePoolPage，
+           并将其设为 hotPage；
+         3.next指针递减，obj指向next的内容，重置page->next内存地址中的内容为0xA3A3A3A3；
+         4.若obj != POOL_SENTINEL，则调用objc_release(obj)释放obj；
+         5.完成以上迭代后，将当前AutoreleasePoolPage设置为 hotPage。
+
+     */
     void releaseUntil(id *stop) 
     {
-        // Not recursive: we don't want to blow out the stack 
-        // if a thread accumulates a stupendous amount of garbage
-        //不是递归的：我们不想炸毁堆栈
-        //如果一个线程累积了大量的垃圾
+        // Not recursive: we don't want to blow out the stack  不是递归的：我们不想炸毁堆栈
+        // if a thread accumulates a stupendous amount of garbage 如果一个线程累积了大量的垃圾
         
+        
+        // 当hotPage和stop所在的page不是同一个page时，也可正常释放
         while (this->next != stop) {
             // Restart from hotPage() every time, in case -release 
             // autoreleased more objects
+            
+            /**
+              hotPage 保存 autorelease pool 当前所分配到的AutoreleasePoolPage；
+              coldPage 是从 hotPage 开始沿parent指针链回溯找到的第一个分配的AutoreleasePoolPage。
+             */
             AutoreleasePoolPage *page = hotPage();
 
             // fixme I think this `while` can be `if`, but I can't prove it
-            while (page->empty()) {
-                page = page->parent;
+            while (page->empty()) { // 如果该page位空(--page->next操作可导致page为空)，则继续清理上一个page。
+                page = page->parent; // 沿着page清理
                 setHotPage(page);
             }
 
             page->unprotect();
             
-            /// 从Page的next指针上一个位置开始释放直到next指向stop
-            id obj = *--page->next;
+            id obj = *--page->next; // 注意: --page->next操作可能导致page为空
             memset((void*)page->next, SCRIBBLE, sizeof(*page->next));
             page->protect();
 
-            if (obj != POOL_BOUNDARY) {
-                objc_release(obj);
+            if (obj != POOL_BOUNDARY) { /// 不是哨兵对象就释放obj
+                objc_release(obj); /// 释放该对象，注意：obj的引用计数会-1
             }
         }
 
@@ -1027,7 +1065,7 @@ class AutoreleasePoolPage
         // Not recursive: we don't want to blow out the stack 
         // if a thread accumulates a stupendous amount of garbage
         AutoreleasePoolPage *page = this;
-        while (page->child) page = page->child;
+        while (page->child) page = page->child; // 找到最后一个page
 
         AutoreleasePoolPage *deathptr;
         do {
@@ -1035,7 +1073,7 @@ class AutoreleasePoolPage
             page = page->parent;
             if (page) {
                 page->unprotect();
-                page->child = nil;
+                page->child = nil; // 将child指针置空
                 page->protect();
             }
             delete deathptr;
@@ -1101,7 +1139,6 @@ class AutoreleasePoolPage
     }
 
     /// hotPage 保存 autorelease pool 当前所分配到的AutoreleasePoolPage；
-    
     static inline AutoreleasePoolPage *hotPage() 
     {
         /**
@@ -1242,6 +1279,7 @@ public:
     }
 
 
+    /// 每次执行autoreleasePool push 都要先添加一个POOL_BOUNDARY哨兵(nil)
     static inline void *push() 
     {
         id *dest;
@@ -1282,6 +1320,18 @@ public:
         objc_autoreleasePoolInvalid(token);
     }
     
+    
+    
+    /**
+     
+     1.token记为stop，stop命名更能表达传入参数的在方法内部的角色，表示 autorelease pool 释放对象到stop终止；
+     2.找到stop所在的AutoreleasePoolPage赋值给page；
+     3.限定stop必须为POOL_SENTINEL，否则抛出异常；
+     4,page->releaseUntil(stop)从 autorelease pool 的堆栈空间弹出对象，直到stop地址为止；
+     5.若page->child为非空则需要调用kill()方法清理 autorelease pool中不必要的空节点：判断若page填满未过半，则删掉page的child链上的所有节点；
+     若page填满过半且page->child->child为非空，则保留page->child节点而删掉page->child的child链上的所有节点。
+     采用上述最后一点的处理策略是为了清理掉无用的AutoreleasePoolPage占用空间的同时，又保留一定的缓冲空间，以避免刚释放完AutoreleasePoolPage又不得不马上新建的情况。
+     */
     /// 该token是一个POOL_BOUNDARY,每次push时都会在pool中添加一个POOL_BOUNDARY.
     /// 一对pop\push操作是使用同一个POOL_BOUNDARY
     static inline void pop(void *token)
@@ -1302,7 +1352,8 @@ public:
             return;
         }
 
-        page = pageForPointer(token); /// 获取token所在的Page
+        /// 获取token所在的Page
+        page = pageForPointer(token);
         stop = (id *)token;
         
         
@@ -1321,7 +1372,8 @@ public:
 
         if (PrintPoolHiwat) printHiwat(); /// 调试相关忽略
 
-        page->releaseUntil(stop); /// 释放对象直到stop这个哨兵的位置
+        /// 释放对象直到stop这个哨兵的位置
+        page->releaseUntil(stop);
 
         // memory: delete empty children
         if (DebugPoolAllocation  &&  page->empty()) {
@@ -1338,7 +1390,7 @@ public:
         else if (page->child) {
             // hysteresis: keep one empty child if page is more than half full
             /// 当前page只留下一个child链
-            /// 因为现在链表中的存储autorelease对象的page只有当前的这个page了,剩下的pagek可以移除，
+            /// 因为现在链表中的存储autorelease对象的page只有当前的这个page了,剩下的page可以移除，
             /// 为了提高效率，避免频繁的创建新的page,这里根据情况保留1-2个空的page
             if (page->lessThanHalfFull()) {
                 page->child->kill();
@@ -1348,6 +1400,34 @@ public:
             }
         }
     }
+    
+    
+    
+    /**
+     总结:
+
+     Autorelease 是将内存堆中的对象统一交由 autorelease pool 管理的一种内存管理方式。
+     
+     NSObject对象调用autorelease方法时，对象被添加到 autorelease pool 中（内部逻辑不调用retain方法因此refCount不会递增）。
+     在合适的时候，如@autoreleasepool块结尾、或者调用了NSAutoreleasePool的drain方法、或者 autorelease pool 所在线程的 Runloop 的 Observer 观察到 Runloop 的 BeforeWaiting 或 Exit 通知等，系统将调用objc_autoreleasePoolPop()函数释放其中所有的autorelease object（内部逻辑有调用objc_release函数因此refCount会递减）；
+
+
+     Autorelease体现在 Cocoa框架的工厂方法使用中（创建对象会将其自动添加到当前线程的默认 autorelease pool 中）是一种内存的 延迟释放机制，
+     如[UIImage imageNamed:@"xxx"]，在短时间内需频繁创建占用内存较大的对象的场景中，需要慎用这些工厂方法；
+     体现在@autoreleasepool块的使用中，则是一种内存的 提前释放机制，对上述场景则可使用@autoreleasepool块提前释放内存；
+
+     Autorelease pool 的本质是__AutoreleasePoolPage双向链表中的某段堆栈空间__。双向链表上的 autorelease pool 之间通过POOL_SENTINEL分隔；
+
+     线程的私有空间中保存了AutoreleasePoolPage双向链表的 hotPage 的地址。一条AutoreleasePoolPage双向链表与一条线程关联；
+
+     新建 autorelease pool 需要记录返回POOL_SENTINEL的地址；释放 autorelease pool 时，以该地址为token释放其对应的 autorelease pool 中的所有对象；
+
+     NSObject对象调用autorelease方法时，将对象的内存地址推入 autorelease pool 的堆栈空间，autorelease pool 的已分配堆栈空间中，除了POOL_SENTINEL外不可能存在其他nil指针；
+
+     作者：Luminix
+     链接：https://juejin.im/post/5dd9eeb7f265da7e1b53f5da
+     */
+    
 
     static void init()
     {
