@@ -389,7 +389,6 @@ static id
 storeWeak(id *location, objc_object *newObj)
 {
     // 该过程用来更新弱引用指针的指向
-    
     assert(haveOld  ||  haveNew); // assert断言，assert(表达式)，表达式为真，什么也不做，表达式为假则crash。
     if (!haveNew) assert(newObj == nil);
     
@@ -411,16 +410,13 @@ storeWeak(id *location, objc_object *newObj)
     // 下面指向的操作会改变旧值
  retry:
     if (haveOld) {
-        // 更改指针，获得以 oldObj 为索引所存储的值地址
         oldObj = *location;
-        oldTable = &SideTables()[oldObj]; /// SideTables全局静态hash表: StripedMap<SideTable>类型
+        oldTable = &SideTables()[oldObj]; /// 获取旧值对象所在的SideTable
     } else {
         oldTable = nil;
     }
     if (haveNew) {
-        // 更改新值指针，获得以 newObj 为索引所存储的值地址
-        /// 怎么样获取的SideTable:
-        newTable = &SideTables()[newObj];
+        newTable = &SideTables()[newObj]; /// 获取新值对象所在的SideTable
     } else {
         newTable = nil;
     }
@@ -442,7 +438,6 @@ storeWeak(id *location, objc_object *newObj)
     // 防止弱引用间死锁
     // 并且通过 +initialize 初始化构造器保证所有弱引用的 isa 非空指向
     if (haveNew  &&  newObj) {
-        
         // 获得新对象的 isa 指针
         Class cls = newObj->getIsa();
         // 判断 isa 非空且已经初始化

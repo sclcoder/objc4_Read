@@ -392,7 +392,7 @@ weak_unregister_no_lock(weak_table_t *weak_table, id referent_id,
     objc_object *referent = (objc_object *)referent_id; /// 被弱引用的对象地址
     objc_object **referrer = (objc_object **)referrer_id;/// 指向被弱引用对象的__weak变量的地址
 
-    weak_entry_t *entry; /// weak table中存放的一个元素
+    weak_entry_t *entry;
 
     if (!referent) return;
     
@@ -438,6 +438,7 @@ weak_register_no_lock(weak_table_t *weak_table, id referent_id,
 
     if (!referent  ||  referent->isTaggedPointer()) return referent_id;
 
+    
     // ensure that the referenced object is viable 要保证引用的对象是可以得到的
     bool deallocating;
     if (!referent->ISA()->hasCustomRR()) {

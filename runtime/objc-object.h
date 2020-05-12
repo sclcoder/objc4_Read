@@ -383,7 +383,7 @@ objc_object::setWeaklyReferenced_nolock()
  retry:
     isa_t oldisa = LoadExclusive(&isa.bits);
     isa_t newisa = oldisa;
-    if (slowpath(!newisa.nonpointer)) { /// 只使用SideTable保存对象引用计数
+    if (slowpath(!newisa.nonpointer)) {
         ClearExclusive(&isa.bits);
         // 则调用sidetable_setWeaklyReferenced_nolock()方法，只是简单设置了SideTable的refcnts中该对象的引用计数信息的弱引用标记位为1
         sidetable_setWeaklyReferenced_nolock();
