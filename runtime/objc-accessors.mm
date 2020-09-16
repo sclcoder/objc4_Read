@@ -62,9 +62,18 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
      */
     
     // Retain release world
-    id *slot = (id*) ((char*)self + offset);
+    id *slot = (id*) ((char*)self + offset); /// 获取成员变量
     if (!atomic) return *slot;
-        
+    
+    ///
+    
+    /**
+     在调用atomic属性时，会导致引用计数器+1, 并且添加到自动释放池中（不会导致引用计数增加），为何这样操作？
+     ### 是为了,保证交接过程中对象的有效性 ###
+     具体分析 https://www.jianshu.com/p/574f2223ccb0
+     过程: 在getter返回value之前,将value进行retain操作,并添加到自动释放池,这样返回后，其他线程在setter中对value的释放操作，能保证value不被销毁
+     这就是atomic针对线程安全所做的操作
+     */
     // Atomic retain release world
     spinlock_t& slotlock = PropertyLocks[slot];
     slotlock.lock();
@@ -72,7 +81,7 @@ id objc_getProperty(id self, SEL _cmd, ptrdiff_t offset, BOOL atomic) {
     slotlock.unlock();
     
     // for performance, we (safely) issue the autorelease OUTSIDE of the spinlock.
-    return objc_autoreleaseReturnValue(value); // 添加到自动释放池
+    return objc_autoreleaseReturnValue(value); // 添加到自动释放池(不会导致引用计数增加)
 }
 
 
