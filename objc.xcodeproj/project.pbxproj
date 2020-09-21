@@ -23,6 +23,10 @@
 /* Begin PBXBuildFile section */
 		2AC318E7240F89FC007C5278 /* TestObject.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC318E6240F89FC007C5278 /* TestObject.m */; };
 		2AC318EA24164697007C5278 /* SubTest.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC318E924164697007C5278 /* SubTest.m */; };
+		2AE0661E2511D0E9002B163B /* TestObject.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC318E6240F89FC007C5278 /* TestObject.m */; };
+		2AE0661F2511D0E9002B163B /* SubTest.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AC318E924164697007C5278 /* SubTest.m */; };
+		2AE066212511D2C2002B163B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2AE066202511D2C2002B163B /* Foundation.framework */; };
+		2AE066282511EAF1002B163B /* AtomicTest.m in Sources */ = {isa = PBXBuildFile; fileRef = 2AE066272511EAF1002B163B /* AtomicTest.m */; };
 		393CEAC00DC69E3E000B69DE /* objc-references.mm in Sources */ = {isa = PBXBuildFile; fileRef = 393CEABF0DC69E3E000B69DE /* objc-references.mm */; };
 		393CEAC60DC69E67000B69DE /* objc-references.h in Headers */ = {isa = PBXBuildFile; fileRef = 393CEAC50DC69E67000B69DE /* objc-references.h */; };
 		39ABD72312F0B61800D1054C /* objc-weak.h in Headers */ = {isa = PBXBuildFile; fileRef = 39ABD71F12F0B61800D1054C /* objc-weak.h */; };
@@ -167,6 +171,9 @@
 		2AC318E6240F89FC007C5278 /* TestObject.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TestObject.m; sourceTree = "<group>"; };
 		2AC318E824164697007C5278 /* SubTest.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SubTest.h; sourceTree = "<group>"; };
 		2AC318E924164697007C5278 /* SubTest.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SubTest.m; sourceTree = "<group>"; };
+		2AE066202511D2C2002B163B /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		2AE066262511EAF1002B163B /* AtomicTest.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AtomicTest.h; sourceTree = "<group>"; };
+		2AE066272511EAF1002B163B /* AtomicTest.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AtomicTest.m; sourceTree = "<group>"; };
 		393CEABF0DC69E3E000B69DE /* objc-references.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; name = "objc-references.mm"; path = "runtime/objc-references.mm"; sourceTree = "<group>"; };
 		393CEAC50DC69E67000B69DE /* objc-references.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "objc-references.h"; path = "runtime/objc-references.h"; sourceTree = "<group>"; };
 		39ABD71F12F0B61800D1054C /* objc-weak.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "objc-weak.h"; path = "runtime/objc-weak.h"; sourceTree = "<group>"; };
@@ -291,6 +298,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2AE066212511D2C2002B163B /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -392,6 +400,8 @@
 				2AC318E6240F89FC007C5278 /* TestObject.m */,
 				2AC318E824164697007C5278 /* SubTest.h */,
 				2AC318E924164697007C5278 /* SubTest.m */,
+				2AE066262511EAF1002B163B /* AtomicTest.h */,
+				2AE066272511EAF1002B163B /* AtomicTest.m */,
 			);
 			path = "objc-test";
 			sourceTree = "<group>";
@@ -557,6 +567,7 @@
 		F9BCC72A205C6A1600DD9AFC /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				2AE066202511D2C2002B163B /* Foundation.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -696,7 +707,6 @@
 		08FB7793FE84155DC02AAC07 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				BuildIndependentTargetsInParallel = NO;
 				LastUpgradeCheck = 0940;
 				TargetAttributes = {
 					5255259721C68E3C00072CE6 = {
@@ -767,6 +777,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2AE066282511EAF1002B163B /* AtomicTest.m in Sources */,
 				2AC318E7240F89FC007C5278 /* TestObject.m in Sources */,
 				5255259B21C68E3C00072CE6 /* main.m in Sources */,
 				2AC318EA24164697007C5278 /* SubTest.m in Sources */,
@@ -777,6 +788,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2AE0661E2511D0E9002B163B /* TestObject.m in Sources */,
+				2AE0661F2511D0E9002B163B /* SubTest.m in Sources */,
 				838485C00D6D687300CEA253 /* hashtable2.mm in Sources */,
 				838485C40D6D687300CEA253 /* maptable.mm in Sources */,
 				838485F10D6D68A200CEA253 /* objc-auto.mm in Sources */,

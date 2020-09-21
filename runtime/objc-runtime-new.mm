@@ -835,6 +835,7 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
 
         method_list_t *mlist = entry.cat->methodsForMeta(isMeta);
         if (mlist) {
+            // 将后序遍历出cat结构，并将cat对应的方法列表存放到临时的mlists容器中。这样mlists容器中分类方法列表的顺序是编译顺序的倒序
             mlists[mcount++] = mlist;
             fromBundle |= entry.hi->isBundle();
         }
@@ -852,8 +853,10 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
     }
 
     auto rw = cls->data();
-    // 添加分类的方法列表到类中  通过调用rw->methods.attachLists()方法
+    // 排序处理
     prepareMethodLists(cls, mlists, mcount, NO, fromBundle);
+    // 添加分类的方法列表到类中  通过调用rw->methods.attachLists()方法
+    // 注意attachLists函数是将mlists整体放到methods容器的前面，而mlists容器中分类方法的存放顺序是编译顺序的倒序。所有后编译的方法在methods容器的前
     rw->methods.attachLists(mlists, mcount);
     free(mlists);
     if (flush_caches  &&  mcount > 0) flushCaches(cls);
@@ -914,7 +917,9 @@ static void methodizeClass(Class cls)
         addMethod(cls, SEL_initialize, (IMP)&objc_noop_imp, "", NO);
     }
 
-    // Attach categories.
+    // Attach categories. 注意: realizeClass -> methodizeClass -> attachCategories 这里也会处理分类
+    // 其他处理分类的流程         _read_images -> remethodizeClass -> attachCategories
+    
     // 将分类中的方法列表添加到rw的方法列表中
     category_list *cats = unattachedCategoriesForClass(cls, true /*realizing*/);
     attachCategories(cls, cats, false /*don't flush caches*/);
@@ -1299,14 +1304,13 @@ static void addFutureNamedClass(const char *name, Class cls)
     ro->name = strdupIfMutable(name);
     rw->ro = ro;
     cls->setData(rw);
-    cls->data()->flags = RO_FUTURE;
+    cls->data()->flags = RO_FUTURE; // 将rw中flag的第30位RW_FUTURE设置为 RO_FUTURE
     
     /**
      Future class 类的有效数据实际上仅有：类名和rw。
      rw中的数据作用也非常少，仅使用flags的RO_FUTURE（实际上就是RW_FUTURE）标记类是 future class；
      
      Future class 的作用是为指定类名的类，提前分配好内存空间，调用readClass(...)函数读取类时，才正式写入类的数据。 Future class 是用于支持类的懒加载机制；
-     
      */
 
     old = NXMapKeyCopyingInsert(futureNamedClasses(), name, cls);
@@ -1326,7 +1330,7 @@ static Class popFutureNamedClass(const char *name)
     runtimeLock.assertLocked();
 
     Class cls = nil;
-
+    // 将future class从 全局哈希表中删除 , 因为其已经realized
     if (future_named_class_map) {
         cls = (Class)NXMapKeyFreeingRemove(future_named_class_map, name);
         if (cls && NXCountMapTable(future_named_class_map) == 0) {
@@ -1950,6 +1954,8 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
 * Returns the real class structure for the class. 
 * Locking: runtimeLock must be write-locked by the caller
 **********************************************************************/
+
+// Returns the real class structure for the class. 返回该类真正的类结构
 static Class realizeClass(Class cls)
 {
     // 对类cls进行首次初始化，包括分配其读写数据。返回该类的真实类结构。
@@ -1985,7 +1991,7 @@ static Class realizeClass(Class cls)
 
     if (!cls) return nil;
     if (cls->isRealized()) return cls; /// 已经认识了直接返回
-    assert(cls == remapClass(cls));  // 传入的类必须不存在于remappedClasses全局哈希表中
+    assert(cls == remapClass(cls));  // 传入的类必须不存在于remappedClasses全局哈希表中(remappedClasses中不存在cls时remapClass函数返回cls本身)
 
     // fixme verify class is not in an un-dlopened part of the shared cache?
 
@@ -2195,10 +2201,12 @@ Class _objc_allocateFutureClass(const char *name)
 
     if ((cls = (Class)NXMapGet(map, name))) {
         // Already have a future class for this name.
+        // 存在名为name的 future class
         return cls;
     }
-
+    // 分配用于保存objc_class的内存空间
     cls = _calloc_class(sizeof(objc_class));
+    // 构建名为name的future class并全局记录到 futureNamedClasses 哈希表
     addFutureNamedClass(name, cls);
 
     return cls;
@@ -2231,6 +2239,7 @@ Class objc_getFutureClass(const char *name)
     // No class or future class with that name yet. Make one.
     // fixme not thread-safe with respect to 
     // simultaneous library load or getFutureClass.
+    // 若查找不到名为name的类或future class，则构建future class
     return _objc_allocateFutureClass(name);
 }
 
@@ -2481,7 +2490,7 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
     
     
     
-    ////       future class的重映射代码: 如果是懒加载的类,将重映射该类，即设置cls中的信息给future cls        ////
+    /// *******future class的重映射代码: 如果是懒加载的类,将重映射该类，即设置cls中的信息给future cls ******///
     
     // 1. 若该类名已被标记为future class（懒加载的类），则弹出该类名对应的future class 赋值给newCls
     if (Class newCls = popFutureNamedClass(mangledName)) {
@@ -2501,23 +2510,36 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
         
         // 2. rw记录future class的rw
         class_rw_t *rw = newCls->data();
+        
         // 3. future class的ro记为old_ro，后面释放其占用的内存空间并丢弃
         const class_ro_t *old_ro = rw->ro;
+        
         // 4. 将cls中的数据拷贝到newCls，主要是要沿用cls的isa、superclass和cache数据
         memcpy(newCls, cls, sizeof(objc_class));
-        // 5. rw记录cls的ro  此时的newCls的内容是从cls中复制过来的,newCls代表cls?
+        
+        // 5. rw记录cls的ro(记录cls的静态数据，即在编译时决议的数据)
         /**
          注意：虽然objc_class的data()方法声明为返回class_rw_t *，但是究其本质，它只是返回了objc_class的bits成员的FAST_DATA_MASK标记的位域中保存的内存地址，该内存地址实际上可以保存任何类型的数据。在Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)函数中，传入的cls所指向的objc_class结构体有其特殊之处：cls的bits成员的FAST_DATA_MASK位域，指向的内存空间保存的是class_ro_t结构体，并不是通常的class_rw_t。
          */
-        rw->ro = (class_ro_t *)newCls->data(); // 此时获取的是cls的ro数据
+        
+        // newCls拷贝的cls的信息, 即此时newCls的rw的值是和cls的rw一样,此时获取的是cls的rw数据,而实际该rw存放的地址信息是ro,所以在这能强转
+        rw->ro = (class_ro_t *)newCls->data();
+        
         // 6. 沿用future class的rw、cls的ro
         newCls->setData(rw);
+        
         // 7. 释放future class的ro占用的空间 在cls映射到newCls过程中，完全丢弃了 future class 的ro数据
         freeIfMutable((char *)old_ro->name);
         free((void *)old_ro);
         
         // 8. 将newCls以cls为关键字添加到remappedClasses哈希表中
         addRemappedClass(cls, newCls);
+        
+        /**
+          Future class 重映射返回新的类，保存在remappedClasses全局哈希表中；
+          普通类重映射返回类本身；
+          重映射的真正的目的是支持类的懒加载，懒加载类暂存为 future class 只记录类名及 future class 属性，在调用readClass才正式载入类数据。
+         */
         
         replacing = cls;
         cls = newCls;
@@ -2678,7 +2700,10 @@ readProtocol(protocol_t *newproto, Class protocol_class,
  _read_images根据前面生成的header_info结构体的数组，加载镜像中定义的 Objective-C 元素，如类、分类、协议。下面的代码非常长，将其分为几个部分详细分析。从代码注释中可以清晰地知道其处理流程。
 
 **********************************************************************/
-
+/**
+  镜像(Image): 映射到内存的目标文件称之为镜像
+ 
+ */
 // 加载镜像中的 Objective-C 元素
 void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int unoptimizedTotalClasses)
 {
@@ -2815,6 +2840,10 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
              调用readClass(...)读取镜像中对应 future class（保存在全局的future_named_class_map哈希表中）的类的元数据，构建 future class 的实体类（remapped future class），并将实体类添加到remappedClasses全局哈希表中
              
              调用readClass(...)读取类数据只是载入了类的class_ro_t静态数据，因此仍需要进一步配置objc_class的class_rw_t结构体的数据。这个过程为 class realizing，姑且称之为认识类
+             
+             
+             总结: readClass(...)读取类数据只是载入了类的class_ro_t静态数据. realizeClass(...)配置objc_class的class_rw_t结构体的数据
+                  futureClass中的class_ro_t数据很少, 是做懒加载用的，在readClass这才将class_ro_t数据赋值给futureClass
              */
             Class newCls = readClass(cls, headerIsBundle, headerIsPreoptimized);
             
@@ -3125,6 +3154,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 // 调用addUnattachedCategoryForClass(...)将分类添加到扩展类的元类的待处理分类哈希表
                 addUnattachedCategoryForClass(cat, cls->ISA(), hi);
                 if (cls->ISA()->isRealized()) {
+                    
+                    
                     // 调用remethodizeClass(...)将协议列表或实例属性或实例方法元素添加到扩展类的元类的class_rw_t数据中
                     remethodizeClass(cls->ISA());
                 }
@@ -5204,13 +5235,13 @@ Method class_getInstanceMethod(Class cls, SEL sel)
     // wants a Method instead of an IMP.
 
 #warning fixme build and search caches
-        
+    // 该方法返回值为IMP,此处并没使用。但是该方法可能通过动态解析为cls添加方法实现
     // Search method lists, try method resolver, etc.
     lookUpImpOrNil(cls, sel, nil, 
                    NO/*initialize*/, NO/*cache*/, YES/*resolver*/);
 
 #warning fixme build and search caches
-
+    // 在当前类中查找方法,会沿着继承链找
     return _class_getMethod(cls, sel);
 }
 
@@ -6187,9 +6218,76 @@ addMethod(Class cls, SEL name, IMP imp, const char *types, bool replace)
     checkIsKnownClass(cls);
     
     assert(types);
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // runtime已经认识这个cls
 
     method_t *m;
+    /**
+    
+     
+     http://yulingtianxia.com/blog/2014/11/05/objective-c-runtime/
+     Method Swizzling 的标准写法
+     
+     #import <objc/runtime.h>
+      
+     @implementation UIViewController (Tracking)
+      
+     + (void)load {
+         static dispatch_once_t onceToken;
+         dispatch_once(&onceToken, ^{
+             Class aClass = [self class];
+                 // When swizzling a class method, use the following:
+             // Class aClass = object_getClass((id)self);
+             
+             SEL originalSelector = @selector(viewWillAppear:);
+             SEL swizzledSelector = @selector(xxx_viewWillAppear:);
+     
+     
+             // 注意: class_getInstanceMethod函数只会在类的继承链中查找方法实现
+             Method originalMethod = class_getInstanceMethod(aClass, originalSelector);
+             Method swizzledMethod = class_getInstanceMethod(aClass, swizzledSelector);
+      
+             // class_addMethod内部会调用addMethod函数来通过originalSelector查找方法实现时，只是查找该类的方法列表，不会沿着继承链查找
+             // 在该类中找不到viewWillAppear:方法实现, 这里添加对应的xxx_viewWillAppear:方法实现
+             // 这样 originalSelector和xxx_viewWillAppear:对应
+             BOOL didAddMethod =
+                 class_addMethod(aClass,
+                     originalSelector,
+                     method_getImplementation(swizzledMethod),
+                     method_getTypeEncoding(swizzledMethod));
+      
+             // class_replaceMethod内部会调用addMethod函数来通过swizzledSelector查找方法实现，其方法实现在本类的方法列表中
+             // 这里将swizzledSelector原本对应的实现xxx_viewWillAppear:  替换了为了viewWillAppear:
+             if (didAddMethod) {
+                 class_replaceMethod(aClass,
+                     swizzledSelector,
+                     method_getImplementation(originalMethod),
+                     method_getTypeEncoding(originalMethod));
+             } else {
+                 // 说明didAddMethod失败，即本类中有originalSelector对应的方法实现，直接交换即可
+                 method_exchangeImplementations(originalMethod, swizzledMethod);
+             }
+         });
+     }
+     
+     
+     /// 如果不做那么class_addMethod操作，而是直接method_exchangeImplementations会发生什么呢？
+     /// 将xxx_viewWillAppear:和 父类中的viewWillAppear: 方法做了交换, 这样做方法交换可能导致crash。
+     /// 因为父类在调用到交换的方法时, 如果那个方法里访问了原来类的成员变量，就会导致crash,因为父类中就没有这个成员。导致crash还有更多其他原因，所以一定要小心。
+     /// 关于Method Swizzling  http://yulingtianxia.com/blog/2017/04/17/Objective-C-Method-Swizzling/
+     
+      
+     #pragma mark - Method Swizzling
+      
+     - (void)xxx_viewWillAppear:(BOOL)animated {
+         [self xxx_viewWillAppear:animated];
+         NSLog(@"viewWillAppear: %@", self);
+     }
+      
+     @end
+     
+     */
+    
+    //   注意: getMethodNoSuper_nolock 查找是否存在该方法是只查找该类，而不是沿着继承链查找。这写在Method Swizzling时要特别注意
     if ((m = getMethodNoSuper_nolock(cls, name))) {  // 若方法已经存在
         // already exists
         if (!replace) {
@@ -6366,6 +6464,24 @@ class_replaceMethodsBulk(Class cls, const SEL *names, const IMP *imps,
 * Locking: acquires runtimeLock
 **********************************************************************/
 
+/***********************************************************************
+* Adds a new instance variable to a class.
+*
+* @return YES if the instance variable was added successfully, otherwise NO
+*         (for example, the class already contains an instance variable with that name).
+*
+* @note This function may only be called after objc_allocateClassPair and before objc_registerClassPair.
+*       Adding an instance variable to an existing class is not supported.  不支持给一个已经存在(注册)的类添加成员变量
+       
+ 
+* @note The class must not be a metaclass. Adding an instance variable to a metaclass is not supported.不支持给元类添加成员变量
+ 
+* @note The instance variable's minimum alignment in bytes is 1<<align. The minimum alignment of an instance
+*       variable depends on the ivar's type and the machine architecture.
+*       For variables of any pointer type, pass log2(sizeof(pointer_type)).
+ 
+************************************************************************/
+
 // 添加成员变量
 BOOL
 class_addIvar(Class cls, const char *name, size_t size, 
@@ -6377,9 +6493,12 @@ class_addIvar(Class cls, const char *name, size_t size,
     if (name  &&  0 == strcmp(name, "")) name = nil;
 
     mutex_locker_t lock(runtimeLock);
-
+    /**
+     查看runtime是否知道这个类: 查看的位置 共享缓存区、alloctedClasses、dataSegment
+     located within the shared cache, within the data segment of a loaded image, or has been allocated with obj_allocateClassPair
+     */
     checkIsKnownClass(cls);
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // 该必须已经realized(runtime已经将其实现)
 
     // No class variables
     // 元类不存在成员变量

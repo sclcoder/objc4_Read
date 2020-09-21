@@ -137,8 +137,8 @@ struct entsize_list_tt {
     uint32_t flags() const {
         return entsizeAndFlags & FlagMask; // // 假如FlagMask为0x03 那么就是将最低两位置1来获取flags
     }
-
-    Element& getOrEnd(uint32_t i) const { 
+    
+    Element& getOrEnd(uint32_t i) const { // 获取顺序表中的对应i位置的元素的地址或者容器的结束地址
         assert(i <= count);
         return *(Element *)((uint8_t *)&first + i*entsize()); 
     }
@@ -154,7 +154,7 @@ struct entsize_list_tt {
     
     static size_t byteSize(uint32_t entsize, uint32_t count) {
         // sizeOf(entsize_list_tt)返回容器的三个成员占用的字节数,具体大小取决于 Element 占用内存大小以及 Element 的对齐结构；
-        return sizeof(entsize_list_tt) + (count-1)*entsize; // count-1是因为first记录了一个元素了？？？
+        return sizeof(entsize_list_tt) + (count-1)*entsize; // count-1是因为first记录了一个元素了
     }
 
     List *duplicate() const {
@@ -186,7 +186,6 @@ struct entsize_list_tt {
         uint32_t entsize;
         uint32_t index;  // keeping track of this saves a divide in operator-
         Element* element;
-        /// 一个iterator占用48个字节
 
         typedef std::random_access_iterator_tag iterator_category;
         typedef Element value_type;
@@ -232,7 +231,7 @@ struct entsize_list_tt {
             return *this;
         }
         const iterator operator + (ptrdiff_t delta) const {
-            return iterator(*this) += delta;
+            return iterator(*this) += delta; /// 本质调用 iterator& operator += (ptrdiff_t delta)，即迭代器的加减，其内部的索引也会加减
         }
         const iterator operator - (ptrdiff_t delta) const {
             return iterator(*this) -= delta;
@@ -278,7 +277,7 @@ struct method_t {
     const char *types; // 方法的类型编码
     MethodListIMP imp; // 方法的实现，即方法的函数指针、方法的IMP
 
-    // 方法在方法列表中排序时使用
+    // 比较器：在方法列表中排序时使用
     struct SortBySELAddress :
         public std::binary_function<const method_t&,
                                     const method_t&, bool>
@@ -368,7 +367,7 @@ struct ivar_t {
 
 struct property_t {
     const char *name; // 有属性名、
-    const char *attributes; // 特性信息
+    const char *attributes; // 特性信息  以字符串的形式表示
 };
 
 // Two bits of entsize are used for fixup markers.
@@ -489,6 +488,16 @@ struct locstamped_category_t {
     category_t *cat;
     struct header_info *hi;
 };
+
+
+/**
+  分类列表
+ 类并不包含像分类列表这样的数据结构，category_t结构体只是为了在编译阶段记录开发者定义的分类，并将其保存到特定的容器中。
+ 但是程序本身则需要保存分类列表，因为加载程序时，需要按照容器内记录的分类信息依次加载分类。
+ 保存应用定义的所有分类的容器是category_list，也是locstamped_category_list_t的别名。
+ locstamped_category_list_t是顺序表容器，元素为locstamped_category_t结构体。
+ locstamped_category_t结构体包含指向category_t结构体的cat成员。
+ */
 // locstamped_category_list_t 数组容器是实现了分类列表
 struct locstamped_category_list_t {
     uint32_t count;
@@ -815,7 +824,7 @@ struct class_ro_t {
 
 /***********************************************************************
 * list_array_tt<Element, List>
-* Generic implementation for metadata that can be augmented by categories.
+* Generic implementation for metadata that can be augmented（增强） by categories.
 *
 * Element is the underlying metadata type (e.g. method_t)
 * List is the metadata's list type (e.g. method_list_t)
@@ -856,10 +865,10 @@ struct class_ro_t {
 template <typename Element, typename List>
 class list_array_tt {
     
-    // 定义二维数组的外层一维数组容器
+    // 定义二维数组的外层一维数组容器: 但其元素为指向列表容器的指针，因此array_t的本质是二维数组
     struct array_t {
-        uint32_t count; // 外层一维数组存储元素数量
-        List* lists[0]; // 内层一维数组容器，元素为指向容器列表的指针，因此array_t的本质是二维数组
+        uint32_t count;
+        List* lists[0];
 
         static size_t byteSize(uint32_t count) {
             return sizeof(array_t) + count*sizeof(lists[0]);
@@ -884,7 +893,7 @@ class list_array_tt {
         {
             if (begin != end) {
                 m = (*begin)->begin(); // 此处的begin()是 List::iterator中的 (entsize_list_tt)
-                mEnd = (*begin)->end(); // 此处的begin()是 List::iterator中的 (entsize_list_tt)
+                mEnd = (*begin)->end(); // 此处的end()是 List::iterator中的 (entsize_list_tt)
             }
         }
 
@@ -921,7 +930,7 @@ class list_array_tt {
  private:
     union {
         List* list; // 要么指向一维数组容器
-        uintptr_t arrayAndFlag; // 要么指向二维数组容器
+        uintptr_t arrayAndFlag; // 要么指向二维数组容器, 即array_t结构
     };
     
     // 容器是否保存的是二维数组
@@ -963,7 +972,7 @@ class list_array_tt {
         return iterator(e, e);
     }
 
-    // 获取Element列表二维数组容器包含的列表数量
+    // 获取Element‘列表二维数组容器（指list_array_tt）’包含的列表数量(注意是**列表数量**)
     uint32_t countLists() {
         if (hasArray()) {
             return array()->count;
@@ -1003,7 +1012,7 @@ class list_array_tt {
     // 获取xx列表二维数组容器的起始地址 List**表示二维数组存放的是List*类型的地址
     List** beginLists() {
         if (hasArray()) {
-            return array()->lists; // array()获取的是外层一维数组的地址 array()->lists获取的是内部一维数组的地址
+            return array()->lists; // array()->lists获取的是内部一维数组容器(array_t)的地址
                                    // 这样返回值是指向List*类型的指针(指针的值是地址，但是带有类型该类型是List*，这样在做运算时单位就是List*)
                                    // 相当于&array[0]
         } else {
@@ -1048,11 +1057,11 @@ class list_array_tt {
             
             array()->count = newCount;
             
-            // 转移容器原内容到新内存空间 将以前的Element列表添加在数组后边
+            // 转移容器原内容到新内存空间 将以前的Element列表添加在数组后边  参数说明： dst src len
             memmove(array()->lists + addedCount, array()->lists, 
                     oldCount * sizeof(array()->lists[0]));
             
-            // 将需要新增的Element列表拷贝到新内存空间 将以前的Element列表内容添加在数组前面
+            // 将需要新增的Element列表拷贝到新内存空间 将以前的Element列表内容添加在数组前面  参数说明： dst src len
             memcpy(array()->lists, addedLists, 
                    addedCount * sizeof(array()->lists[0]));
         }
@@ -1112,6 +1121,13 @@ class list_array_tt {
         return result;
     }
 };
+
+/**
+ 类的方法列表信息保存在class_rw_t结构体的methods成员中，类型为method_array_t。
+ method_array_t是按list_array_tt模板构建，以method_t（方法）为元素，以method_list_t（方法列表）为列表容器的二维数组容器，用于存储类的方法列表。
+ method_list_t继承自entsize_list_tt顺序表模板，entsize_list_tt在 Runtime源代码解读2（类和对象） 介绍过，是具有固定类型元素的顺序表容器，
+ 注意到FlagMask指定为0x03，因此method_list_t的entsizeAndFlags成员最低两位预留有特殊功能：若最低两位均为1，表示该方法列表已排序。
+ */
 
 // 方法列表二维数组容器 容器中存放的是指向method_list_t指针的地址
 class method_array_t : 
@@ -1776,7 +1792,7 @@ struct objc_class : objc_object {
         return data()->ro->instanceStart;
     }
 
-    // Class's instance start rounded up to a pointer-size boundary.
+    // Class's instance start rounded up（四舍五入） to a pointer-size boundary.
     // This is used for ARC layout bitmaps.
     uint32_t alignedInstanceStart() {
         return word_align(unalignedInstanceStart());

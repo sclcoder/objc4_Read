@@ -663,7 +663,7 @@ static void _class_resolveClassMethod(Class cls, SEL sel, id inst)
 // 动态解析实例方法
 static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
 {
-    // 若类未实现resolveInstanceMethod方法，则不走方法动态解析流程
+    // 若类未实现 +resolveInstanceMethod 方法，则不走方法动态解析流程 , 注这里resolver = NO
     if (! lookUpImpOrNil(cls->ISA(), SEL_resolveInstanceMethod, cls, 
                          NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
     {
@@ -673,11 +673,6 @@ static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
 
     BOOL (*msg)(Class, SEL, SEL) = (typeof(msg))objc_msgSend;
     
-    // 触发方法动态解析流程 : msg()即调用resolveInstanceMethod方法，在该resolveInstanceMethod方法中调用class_addMethod动态添加sel的IMP
-    bool resolved = msg(cls, SEL_resolveInstanceMethod, sel);
-
-    // Cache the result (good or bad) so the resolver doesn't fire next time.
-    // +resolveInstanceMethod adds to self a.k.a. cls
     
     /**
       如果在resolveInstanceMethod方法中动态添加了对应SEL的IMP,再次走lookUpImpOrNil流程,在这次流程中会在方法列表中找到IMP。
@@ -685,8 +680,19 @@ static void _class_resolveInstanceMethod(Class cls, SEL sel, id inst)
       
      注意: 再次调用 lookUpImpOrNil(...); 时 resolver 设置为 NO,保证动态解析只走一次。 因为会有这样的场景: 只实现了resolveInstanceMethod方法并返回YES,但是并没有在该方法中动态添加IMP。此时设置resolver=NO可以避免死循环,从而走消息转发逻辑。
      
-     注意：完成动态解析后，又立即调用了lookUpImpOrNil(...)，其目的是将resolveInstanceMethod、resolveClassMethod方法实现代码中为响应SEL而动态添加的IMP加入到类的方法缓冲，则下一次调用可直接从方法缓冲中获取。
      */
+    
+    
+    // 触发方法动态解析流程 : msg()即调用resolveInstanceMethod方法，在该resolveInstanceMethod方法中调用class_addMethod动态添加sel的IMP
+    bool resolved = msg(cls, SEL_resolveInstanceMethod, sel);
+
+    // Cache the result (good or bad) so the resolver doesn't fire next time.
+    // +resolveInstanceMethod adds to self a.k.a. cls
+
+    
+    /// 注意：完成动态解析后，又立即调用了lookUpImpOrNil(...)
+    /// 其目的是将resolveInstanceMethod、resolveClassMethod方法实现代码中为响应SEL而动态添加的IMP加入到类的方法缓冲，则下一次调用可直接从方法缓冲中获取。
+    /// 这次调用lookUpImpOrNil 传入的 resolver = NO , 即不再走动态解析
     IMP imp = lookUpImpOrNil(cls, sel, inst, 
                              NO/*initialize*/, YES/*cache*/, NO/*resolver*/);
 
@@ -731,7 +737,7 @@ void _class_resolveMethod(Class cls, SEL sel, id inst)
         // 动态解析类方法
         _class_resolveClassMethod(cls, sel, inst);
         
-        // 这里为什么要给元类再动态解析实例方法
+        // 这里为什么要给元类再动态解析实例方法？？？
         if (!lookUpImpOrNil(cls, sel, inst, 
                             NO/*initialize*/, YES/*cache*/, NO/*resolver*/)) 
         {
@@ -836,12 +842,17 @@ IMP class_lookupMethod(Class cls, SEL sel)
     return class_getMethodImplementation(cls, sel);
 }
 
+// runtime查找方法实现的入口函数
 IMP class_getMethodImplementation(Class cls, SEL sel)
 {
     IMP imp;
 
     if (!cls  ||  !sel) return nil;
-
+    /// 注意: 此处第一次调用lookUpImpOrNil函数传入的
+    /// initialize ## 是否可进行初始化 ##
+    /// cache ## 是否可进行缓存 ##
+    /// 特别注意resolver参数，第一次传入的是YES, 含义为## 可以进行动态解析操作 ## , 内部进行动态解析后再次调用lookUpImpOrNil传入的resolver=NO,避免死循环
+    /// 具体细节看内部的lookUpImpOrForward函数
     imp = lookUpImpOrNil(cls, sel, nil, 
                          YES/*initialize*/, YES/*cache*/, YES/*resolver*/);
 
